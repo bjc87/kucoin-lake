@@ -1,6 +1,6 @@
 # KuCoin Lake — Runbooks
 
-This document is an operational guide for running the ingestion, resampling, metadata builds, integrity checks, and universe engineering workflows safely and repeatably.
+This document is an operational guide for running the ingestion, resampling, and metadata workflows safely and repeatably.
 
 Design priorities:
 - research correctness > micro-optimisation
@@ -25,17 +25,17 @@ NAS mount assumptions:
     /Volumes/quant_data/kucoin/futures/
     /Volumes/quant_data/kucoin/spot/   (future)
 
-Local staging (optional):
-- Local staging may be used for downloaded zip bundles and temporary extracted files.
-- Staging is not the canonical lake; the NAS lake is.
+Local staging:
+- ZIP downloads live on local disk (see docs/ingestion.md).
+- Ingestion uses a local staging directory to write Parquet, then atomically copies to NAS.
 
 Timezones:
 - All timestamps are treated as UTC unless explicitly documented otherwise.
 - Daily keys (DATE) are computed as CAST(ts AS DATE) in UTC.
 
 Safety:
-- Any command that deletes/recomputes must be scoped by (market, timeframe).
-- Destructive actions require an explicit --yes flag (recommended).
+- Any delete/recompute must be scoped by (market, timeframe) inside the code.
+- Avoid manual deletes in the metadata DB unless you can scope them precisely.
 
 --------------------------------------------------------------------
 1. QUICK START (MOST COMMON WORKFLOW)
@@ -45,11 +45,10 @@ Goal: update lake + metadata incrementally for 1m futures.
 
 1) Ingest new raw data (download + parquet write) for 1m
 2) Update metadata for 1m (manifest + coverage + stats + alignment + liquidity)
-3) Run integrity checks for 1m klines on changed symbol-days
-4) Update universe for 1m
+3) (Optional) integrity/universe updates (not implemented yet)
 
 Recommended cadence:
-- daily: run incremental 1m metadata + integrity + universe
+- daily: run incremental 1m metadata
 - weekly: run broader sanity checks and alignment trend review
 
 --------------------------------------------------------------------
@@ -67,35 +66,19 @@ Recommendation:
 - If DB must be on NAS, enforce single-writer strictly.
 
 2.2 Initialize schemas and tables
-- Ensure schema `md` exists.
-- Ensure all required tables exist:
-    md_file_manifest
-    md_partition_coverage
-    md_symbol_dataset_stats
-    md_alignment_summary
-    md_liquidity_daily
-  Recommended:
-    md_kline_integrity_day
-    md_meta_runs
+- `connect_meta_db(...)` in `archive/metadata.py` creates the `md` schema and tables on first use.
 
-2.3 Perform an initial manifest build
-- Scan filesystem for candidate Parquet files (scoped to 1m + funding).
-- Upsert all files into md_file_manifest.
+2.3 Perform an initial metadata build for timeframe=1m
+- Run `build_or_update_metadata(...)` with `timeframe_filter='1m'`.
+- This scans the lake, upserts manifest rows, and builds coverage/stats/alignment/liquidity.
+- Funding participates only in logical 1m builds.
 
-2.4 Perform initial metadata build for timeframe=1m
-- Run coverage, stats, alignment, liquidity for 1m.
-- Funding participates only in logical 1m build.
-
-2.5 Verify initial outputs
+2.4 Verify initial outputs
 - Spot-check row counts:
   - md_file_manifest should have one row per Parquet file
   - md_partition_coverage should have one row per (symbol, dataset, day) for 1m
   - md_liquidity_daily should have one row per (symbol, day) for 1m
 - Verify no other timeframe rows were created.
-
-2.6 Optional: first integrity + universe build
-- Compute md_kline_integrity_day for 1m (bulk for recent window or full history)
-- Compute universe membership (hysteresis) for 1m
 
 --------------------------------------------------------------------
 3. ROUTINE INCREMENTAL RUN (DAILY)
@@ -106,16 +89,11 @@ This is the standard “keep metadata up to date” run.
 Inputs:
 - market = futures
 - timeframe_filter = 1m
-- datasets = [klines, mark, index] plus funding participation
+- datasets = [klines, mark, index, funding]
 
 3.1 Step A: Update manifest and detect changes
-- Iterate filesystem Parquet candidates scoped to timeframe_filter
-- Upsert manifest rows
-- Compute changed/new file paths list for this run
-
-Outputs:
-- changed file paths list
-- changed partition set (dataset, symbol, date/month)
+- `iter_data_parquets(...)` scans filesystem candidates scoped to timeframe_filter.
+- `get_new_or_changed_files(...)` detects new/changed files via size/mtime.
 
 3.2 Step B: Incremental coverage update
 - For each dataset, recompute coverage only for impacted symbol-days.
@@ -124,34 +102,16 @@ Outputs:
 
 3.3 Step C: Incremental symbol dataset stats
 - Recompute stats only for impacted (symbol, dataset, timeframe).
-- Stats must remain scoped by timeframe (no mixing 1m with 1d).
+- Stats remain scoped by timeframe.
 
 3.4 Step D: Incremental alignment update
-- Recompute alignment only for affected days (and symbols if applicable).
-- Ensure funding participation policy is honored.
+- Recompute alignment only for affected symbol-days.
+- Ensure funding participation policy is honored (1m only).
 
 3.5 Step E: Incremental liquidity daily
 - Recompute dollar volume for affected days.
 - Recompute rolling median + rank for affected date range WITH LOOKBACK.
   Example: for 30-day rolling median, include date_from-29 days.
-
-3.6 Step F: Integrity checks (recommended)
-- For changed 1m klines symbol-days:
-  - compute gaps and duplicates
-  - write md_kline_integrity_day
-- Do not block by default; store results.
-
-3.7 Step G: Universe update (recommended)
-- Recompute membership for affected dates.
-- Apply integrity filters (exclude suspect symbol-days if configured).
-- Apply hysteresis membership rules.
-
-3.8 Run audit (recommended)
-- Record run parameters and counts in md_meta_runs:
-  - scanned_files
-  - changed_files
-  - updated_partitions
-  - status success/failed
 
 --------------------------------------------------------------------
 4. BUILDING DERIVED 1D BARS FROM 1M
@@ -162,7 +122,7 @@ Goal: generate derived timeframe data without impacting raw 1m.
 Inputs:
 - source timeframe: 1m
 - target timeframe: 1d
-- dataset: typically klines (and optionally mark/index if desired)
+- dataset: klines (and optionally mark/index)
 
 4.1 Determine date range to build
 - Identify newest 1m day available per symbol.
@@ -173,21 +133,17 @@ Recommendation:
 - Use a “cap date” of yesterday UTC if today’s data is incomplete.
 
 4.2 Run DuckDB set-based resample
-- Read 1m Parquet via hive partitioning
-- Aggregate to 1d bars
-- Write Parquet to month-partitioned location:
+- Use `resample_bars(...)` in `archive/resample.py`.
+- Writes Parquet to month-partitioned location:
     {dataset}/timeframe=1d/symbol={symbol}/month={YYYY-MM}/data.parquet
 
-4.3 Validate resample correctness
+4.3 Validate resample correctness (manual checks)
 - For a sample of symbol-days:
   - compare derived OHLCV to aggregated 1m OHLCV
   - ensure exact match for open/high/low/close and sums for volume
-- Store validation results (optional but recommended).
 
 4.4 Metadata build for timeframe=1d
-- Run metadata builders with timeframe_filter=1d:
-  - manifest update scoped to 1d
-  - coverage/stats/alignment/liquidity for 1d only
+- Run `build_or_update_metadata(...)` with timeframe_filter=1d.
 - Funding must NOT participate in 1d builds.
 
 Key pitfall:
@@ -214,14 +170,6 @@ B) 1h is ingested natively (if exchange provides it and you choose to store it)
 - Must be fully scoped by timeframe=1h.
 - Must not delete or modify 1m/1d rows.
 - Funding must not participate unless explicitly designed (default: no).
-
-5.4 Add integrity hooks
-- If timeframe is not 1m, gap checks differ (expected bars/day changes).
-- Integrity logic must be parameterised by timeframe.
-
-5.5 Update universe logic (optional)
-- Decide whether universe is defined at 1m and reused, or computed per timeframe.
-- Default: compute universe per timeframe if you trade/validate per timeframe.
 
 --------------------------------------------------------------------
 6. ADDING A NEW MARKET (SPOT)
@@ -254,7 +202,7 @@ Backfills are common and must be safe and resumable.
 
 7.1 Ingest backfill files
 - Ensure deterministic/idempotent ingestion (same inputs produce same output paths).
-- Avoid partial overwrites by writing to temp then moving into place (optional).
+- Avoid partial overwrites by writing to temp then moving into place (already handled by ingestion script).
 
 7.2 Run incremental metadata build
 - Manifest should detect changed/new partitions.
@@ -264,11 +212,10 @@ Backfills are common and must be safe and resumable.
 - Consider running in chunks:
   - by symbol group
   - by month
-- Record each chunk run in md_meta_runs.
 
 7.4 Post-backfill validations
 - Recompute alignment summaries for backfilled date range.
-- Run integrity checks for backfilled symbol-days.
+- Sample a few symbol-days and compare raw parquet to metadata (sanity).
 
 --------------------------------------------------------------------
 8. FAILURE RECOVERY AND RESUMABILITY
@@ -296,11 +243,9 @@ Backfills are common and must be safe and resumable.
 --------------------------------------------------------------------
 
 After each daily run:
-- md_meta_runs status is success
 - changed_files count is plausible
 - liquidity ranks present for recent days
 - alignment score not materially degraded vs previous days
-- integrity flags do not spike unexpectedly
 
 Weekly:
 - Compare global min/max timestamps in md_symbol_dataset_stats across datasets for consistency.
@@ -330,30 +275,51 @@ Pitfall: running concurrent writers against the same DuckDB file
 - Enforce single-writer.
 
 --------------------------------------------------------------------
-11. SUGGESTED CLI COMMAND SHAPES (PSEUDO)
+11. EXAMPLE PYTHON INVOCATIONS
 --------------------------------------------------------------------
 
-The exact CLI will depend on implementation, but the recommended shape is:
+There is no CLI yet. Current usage is via Python APIs in `archive/`:
 
-- Update manifest only:
-  kucoin-lake manifest --market futures --timeframe 1m --datasets klines,mark,index --nas-root /Volumes/quant_data/kucoin/futures
+```python
+from pathlib import Path
+from archive.fetch_data import fetch_futures
+from archive.nas_parquet_mirror import run_ingest
+from archive.metadata import build_or_update_metadata
+from archive.resample import resample_bars
 
-- Full incremental metadata:
-  kucoin-lake metadata --market futures --timeframe 1m --datasets klines,mark,index --nas-root /Volumes/quant_data/kucoin/futures
+# 1) Download (local staging)
+fetch_futures(
+    out_root="/Users/you/coding/data/kucoin",
+    symbols=["BTCUSDTM"],
+    datatype=["klines", "mark", "index", "funding"],
+    days=3,
+)
 
-- Resample 1d:
-  kucoin-lake resample --market futures --source-timeframe 1m --target-timeframe 1d --dataset klines --nas-root /Volumes/quant_data/kucoin/futures --date-from 2025-01-01 --date-to 2026-01-01
+# 2) Ingest ZIP -> Parquet
+run_ingest(
+    startdate="2026-01-01",
+    enddate="2026-01-03",
+    assets=["BTCUSDTM"],
+    timeframes=["1m"],
+    local_root=Path("/Users/you/coding/data/kucoin/data"),
+)
 
-- Integrity checks:
-  kucoin-lake integrity --market futures --timeframe 1m --dataset klines --nas-root /Volumes/quant_data/kucoin/futures --mode incremental
+# 3) Metadata update
+build_or_update_metadata(
+    "/Volumes/quant_data/kucoin",
+    market="futures",
+    timeframe_filter="1m",
+)
 
-- Universe update:
-  kucoin-lake universe --market futures --timeframe 1m --nas-root /Volumes/quant_data/kucoin/futures --top-n 100 --hysteresis ...
-
-All destructive operations should require:
-  --yes
-
-And all commands should refuse unsafe roots.
+# 4) Resample 1d
+resample_bars(
+    "/Volumes/quant_data/kucoin",
+    market="futures",
+    dataset="klines",
+    timeframe_src="1m",
+    timeframe_dst="1d",
+)
+```
 
 --------------------------------------------------------------------
 END

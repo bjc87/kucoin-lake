@@ -216,12 +216,11 @@ Rationale:
 10. DEVELOPMENT AND TOOLING
 --------------------------------------------------------------------
 
-Decision: Use a Python package structure (src/kucoin_lake)  
+Decision: Keep working code in `archive/` while a future package refactor is planned  
 Rationale:
-- Clean imports.
-- Testability.
-- Safer refactors.
-- Easier use with tools like Codex.
+- The operational pipeline currently lives in `archive/` scripts.
+- `kucoin-lake/` is a placeholder for a future refactor once invariants are locked.
+- Avoids premature refactors that could change behavior.
 
 Decision: Preserve legacy scripts under archive/  
 Rationale:

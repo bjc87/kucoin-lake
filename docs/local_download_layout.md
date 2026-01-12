@@ -31,7 +31,7 @@ The ingestion layer is responsible for translating this layout into the canonica
 2. CURRENT LOCAL DIRECTORY STRUCTURE
 --------------------------------------------------------------------
 
-Current example layout:
+Current example layout (after `fetch_futures(...)`):
 
 └── ~/coding/data/kucoin/data/futures/daily
     ├── fundingRates
@@ -117,6 +117,10 @@ Maps to lake path:
   funding/symbol={SYMBOL}/date=YYYY-MM-DD/data.parquet
 
 Notes:
+- `fetch_futures(...)` downloads under `out_root/data/futures/daily/...` because KuCoin keys are prefixed by `data/`.
+  Example: if `out_root=/Users/you/coding/data/kucoin`, downloads land under
+  `/Users/you/coding/data/kucoin/data/futures/daily/...`.
+- `run_ingest(...)` expects `local_root` to point at the directory that contains `futures/` (typically the `.../data` folder shown above).
 - The local directory names are not treated as stable contracts.
 - Filenames are parsed only to extract symbol, timeframe, and date.
 - The canonical output path is always determined by lake rules, not by local layout.

@@ -10,7 +10,7 @@ from typing import Any, Optional, Sequence, Union
 
 import duckdb
 
-from nas_parquet_mirror import atomic_copy_to_parquet
+from nas_parquet_mirror import LOCAL_STAGE_ROOT, atomic_copy_to_parquet
 
 # -----------------------------
 # Partition parsing helpers
@@ -331,6 +331,11 @@ def resample_bars(
       - No manual deletion needed.
     """
     nas_root = Path(nas_root)
+    if local_staging_dir is None:
+        local_staging_dir = LOCAL_STAGE_ROOT
+    else:
+        local_staging_dir = Path(local_staging_dir)
+    local_staging_dir.mkdir(parents=True, exist_ok=True)
 
     if dataset not in ("klines", "mark", "index"):
         raise ValueError("dataset must be one of: 'klines', 'mark', 'index'")

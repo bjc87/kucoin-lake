@@ -879,7 +879,7 @@ def convert_mark_zip(
                     CAST("open"  AS DOUBLE) AS open,
                     CAST("high"  AS DOUBLE) AS high,
                     CAST("low"   AS DOUBLE) AS low,
-                    CAST("close" AS DOUBLE) AS close,
+                    CAST("close" AS DOUBLE) AS close
                 FROM read_csv(
                     '{csv_path.as_posix()}',
                     delim=',',
@@ -955,7 +955,7 @@ def convert_index_zip(
                     CAST("open"  AS DOUBLE) AS open,
                     CAST("high"  AS DOUBLE) AS high,
                     CAST("low"   AS DOUBLE) AS low,
-                    CAST("close" AS DOUBLE) AS close,
+                    CAST("close" AS DOUBLE) AS close
                 FROM read_csv(
                     '{csv_path.as_posix()}',
                     delim=',',
@@ -1553,7 +1553,7 @@ def run_ingest(
                 if status in ("ok", "done"):
                     stats["result"]["klines_ok_or_done"] += 1
                 elif status == "skip":
-                    stats["result"]['klines_slipped'] += 1
+                    stats["result"]["klines_skipped"] += 1
                 else:
                     stats["result"]["klines_failed"] += 1
 

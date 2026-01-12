@@ -799,6 +799,13 @@ def convert_funding_zip(
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             csv_path = extract_single_csv(zip_path, td_path)
+            fields = read_header_fields(csv_path, ",")
+            expected = {"open", "high", "low", "close"}
+            if not expected.issubset(fields):
+                raise ValueError(
+                    "Unexpected schema for mark zip: expected columns "
+                    f"{sorted(expected)} but got: {fields}"
+                )
 
             select_sql = f"""
                 SELECT
@@ -871,6 +878,13 @@ def convert_mark_zip(
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             csv_path = extract_single_csv(zip_path, td_path)
+            fields = read_header_fields(csv_path, ",")
+            expected = {"open", "high", "low", "close"}
+            if not expected.issubset(fields):
+                raise ValueError(
+                    "Unexpected schema for mark zip: expected columns "
+                    f"{sorted(expected)} but got: {fields}"
+                )
 
             select_sql = f"""
                 SELECT
@@ -947,6 +961,13 @@ def convert_index_zip(
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             csv_path = extract_single_csv(zip_path, td_path)
+            fields = read_header_fields(csv_path, ",")
+            expected = {"open", "high", "low", "close"}
+            if not expected.issubset(fields):
+                raise ValueError(
+                    "Unexpected schema for index zip: expected columns "
+                    f"{sorted(expected)} but got: {fields}"
+                )
 
             select_sql = f"""
                 SELECT

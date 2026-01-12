@@ -1,0 +1,99 @@
+# ----------------------------------------
+# Python
+# ----------------------------------------
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.venv/
+venv/
+env/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.dist-info/
+.eggs/
+*.egg-info/
+build/
+dist/
+
+# ----------------------------------------
+# Editors / OS
+# ----------------------------------------
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ----------------------------------------
+# DuckDB / databases
+# ----------------------------------------
+*.duckdb
+*.duckdb-wal
+*.duckdb-shm
+*.sqlite
+*.db
+
+# ----------------------------------------
+# Data files (NEVER commit real data)
+# ----------------------------------------
+*.parquet
+*.csv
+*.tsv
+*.json
+*.ndjson
+*.feather
+*.arrow
+
+# ----------------------------------------
+# Archives / downloads
+# ----------------------------------------
+*.zip
+*.gz
+*.tar
+*.tgz
+*.bz2
+*.7z
+
+# ----------------------------------------
+# Project-specific large dirs
+# ----------------------------------------
+/sample_data/
+/data/
+/downloads/
+/zips/
+/raw/
+/staging/
+/local_data/
+/nas/
+/Volumes/
+/mnt/
+
+# ----------------------------------------
+# If you keep tiny committed fixtures, whitelist them:
+# ----------------------------------------
+!tests/fixtures/**
+!tests/fixtures/**/data.parquet
+
+# ----------------------------------------
+# Logs / outputs
+# ----------------------------------------
+*.log
+logs/
+tmp/
+.temp/
+.cache/
+
+# ----------------------------------------
+# Secrets
+# ----------------------------------------
+.env
+.env.*
+*.key
+*.pem

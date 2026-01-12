@@ -1,9 +1,7 @@
 # KuCoin Lake — Data Lake Layout
 
 This document defines the **canonical on-disk layout** for the KuCoin Parquet data lake.  
-It is the authoritative contract for all downstream systems: manifest, metadata, integrity, resampling, universe construction, and research.
-
-If code behavior conflicts with this document, **this document wins**.
+It is the contract the current code implements, and downstream systems (manifest, metadata, resampling, research) must align with it.
 
 This layout is designed to support:
 - deterministic file discovery
@@ -126,7 +124,7 @@ Hive partition columns exposed by DuckDB read_parquet(hive_partitioning=1):
 - date      : string (must be cast to DATE when used)
 
 Used by:
-- manifest parsing
+- manifest scanning
 - coverage
 - alignment
 - liquidity
@@ -158,6 +156,10 @@ Important:
   CAST(ts AS DATE)
 
 Code must never assume that a hive `date` column exists for derived data.
+
+Derived 1d output columns (current resampler behavior):
+- klines: `date`, `open`, `high`, `low`, `close`, `volume`, `dollar_volume`, `vwap`, `src_rows`, `min_ts`, `max_ts`
+- mark/index: `date`, `open`, `high`, `low`, `close`, `src_rows`, `min_ts`, `max_ts`
 
 --------------------------------------------------------------------
 4.3 Funding (non-timeframed, daily partitioned)
@@ -219,6 +221,7 @@ Typical expectations:
 
 klines:
 - ts
+- time_ms (ingestion keeps ms epoch as BIGINT)
 - open
 - high
 - low
@@ -227,10 +230,15 @@ klines:
 
 mark / index:
 - ts
-- price-like columns
+- open
+- high
+- low
+- close
 
 funding:
+- symbol
 - ts (or funding_time normalized to ts)
+- time_ms (ingestion keeps ms epoch as BIGINT)
 - funding_rate
 
 Downstream logic must reference columns explicitly and never rely on implicit ordering.
@@ -293,4 +301,4 @@ This layout is:
 
 Local download formats, vendor APIs, and temporary staging layouts are NOT contractual.
 
-If something disagrees with this document, this document is correct.
+If something disagrees with this document, update this document to match the code (or adjust the code deliberately).

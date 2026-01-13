@@ -1,32 +1,34 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 from datetime import date, datetime, timezone, timedelta
-import re
+import sys
 import time
 import requests
 from urllib.parse import urlencode
 from xml.etree import ElementTree as ET
-from typing import Iterable, Literal
+from typing import Iterable
 from requests import Session
 from tqdm.auto import tqdm
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from kucoin_lake.constants import DATASETS, DataType
+from kucoin_lake.paths import (
+    date_from_key,
+    iter_dates,
+    key_for_futures_zip,
+    month_starts,
+    normalize_symbol,
+)
 
 BASE = "https://historical-data.kucoin.com/"
 
 # -----------------------------
 # Normalisation + date helpers
 # -----------------------------
-
-def normalize_symbol(sym: str) -> str:
-    # XBT -> BTC only at start (avoid AIXBT etc.)
-    return ("BTC" + sym[3:]) if sym.startswith("XBT") else sym
-
-_DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\.zip(?:\.CHECKSUM)?$")
-
-def date_from_key(key: str) -> date | None:
-    m = _DATE_RE.search(key)
-    return date.fromisoformat(m.group(1)) if m else None
 
 def _parse_date(s: str) -> date:
     # expects YYYY-MM-DD
@@ -57,40 +59,10 @@ def _resolve_date_range(
         raise ValueError("start_date must be <= end_date")
     return start, end
 
-def month_starts(start: date, end: date) -> Iterable[date]:
-    y, m = start.year, start.month
-    cur = date(y, m, 1)
-    while cur <= end:
-        yield cur
-        if m == 12:
-            y, m = y + 1, 1
-        else:
-            m += 1
-        cur = date(y, m, 1)
-
 def _as_list(x: str | list[str] | tuple[str, ...]) -> list[str]:
     if isinstance(x, (list, tuple)):
         return list(x)
     return [x]
-
-def iter_dates(start: date, end: date) -> Iterable[date]:
-    d = start
-    while d <= end:
-        yield d
-        d += timedelta(days=1)
-
-def key_for_futures_zip(symbol: str, dataset: DataType, d: date, timeframe: str = "1m") -> str:
-    spec = DATASETS[dataset]
-    sym = normalize_symbol(symbol)
-    ds = spec.base_dir
-    ds_date = d.isoformat()
-
-    if spec.has_timeframe:
-        # e.g. klines/index/mark
-        return f"data/futures/daily/{ds}/{sym}/{timeframe}/{sym}-{timeframe}-{ds_date}.zip"
-    else:
-        # fundingRates
-        return f"data/futures/daily/{ds}/{sym}/{sym}-fundingRates-{ds_date}.zip"
 
 
 # -----------------------------
@@ -133,46 +105,6 @@ def s3_list_page(prefix: str, delimiter: str = "", max_keys: int = 1000) -> dict
 # Datatype config (futures only)
 # -----------------------------
 
-DataType = Literal["klines", "funding", "mark", "index"]
-
-@dataclass(frozen=True)
-class DatasetSpec:
-    name: DataType
-    # base directory under data/futures/daily/
-    base_dir: str
-    # whether it has timeframe folder
-    has_timeframe: bool
-    # filename prefix (before YYYY-MM-DD), NOT including the trailing YYYY-MM
-    # e.g. funding: "{sym}-fundingRates-"
-    # e.g. klines:  "{sym}-{tf}-"
-    file_prefix_template: str
-
-DATASETS: dict[DataType, DatasetSpec] = {
-    "klines": DatasetSpec(
-        name="klines",
-        base_dir="klines",
-        has_timeframe=True,
-        file_prefix_template="{sym}-{tf}-",
-    ),
-    "index": DatasetSpec(
-        name="index",
-        base_dir="index",
-        has_timeframe=True,
-        file_prefix_template="{sym}-{tf}-",
-    ),
-    "mark": DatasetSpec(
-        name="mark",
-        base_dir="mark",
-        has_timeframe=True,
-        file_prefix_template="{sym}-{tf}-",
-    ),
-    "funding": DatasetSpec(
-        name="funding",
-        base_dir="fundingRates",
-        has_timeframe=False,
-        file_prefix_template="{sym}-fundingRates-",
-    ),
-}
 
 # -----------------------------
 # Sharded key listing

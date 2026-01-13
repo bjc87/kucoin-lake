@@ -10,11 +10,17 @@ from datetime import date
 from typing import Iterable
 from pathlib import Path
 import shutil
+import sys
 
 import duckdb
 
-import time
 from dataclasses import dataclass
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from kucoin_lake.paths import month_starts
 
 try:
     from tqdm.auto import tqdm
@@ -267,17 +273,6 @@ def detect_delim(csv_path: Path) -> str:
 # Sharding
 # -----------------------------
 
-def _month_starts(start: date, end: date):
-    y, m = start.year, start.month
-    cur = date(y, m, 1)
-    while cur <= end:
-        yield cur
-        if m == 12:
-            y, m = y + 1, 1
-        else:
-            m += 1
-        cur = date(y, m, 1)
-
 def list_local_ohlc_zips_sharded(
     root: Path,
     dataset: str,          # "klines" | "mark" | "index"
@@ -310,7 +305,7 @@ def list_local_ohlc_zips_sharded(
             folder = ds_root / sym / tf
             if not folder.exists():
                 continue
-            for m in _month_starts(start, end):
+            for m in month_starts(start, end):
                 ym = f"{m.year:04d}-{m.month:02d}"
                 pat = f"{sym}-{tf}-{ym}-*.zip"
                 out.extend(folder.glob(pat))
@@ -350,7 +345,7 @@ def list_local_funding_zips_sharded(
         folder = ds_root / sym
         if not folder.exists():
             continue
-        for m in _month_starts(start, end):
+        for m in month_starts(start, end):
             ym = f"{m.year:04d}-{m.month:02d}"
             pat = f"{sym}-fundingRates-{ym}-*.zip"
             out.extend(folder.glob(pat))

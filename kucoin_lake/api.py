@@ -6,13 +6,14 @@ from typing import Iterable, Optional, Sequence, Any
 from archive import metadata as metadata_module
 from archive import nas_parquet_mirror as mirror_module
 from archive import resample as resample_module
+from kucoin_lake.constants import DEFAULT_FUTURES_DATASETS
 
 
 def build_metadata(
     nas_root: str | Path,
     *,
     market: str = "futures",
-    datasets: Iterable[str] = metadata_module.DEFAULT_FUTURES_DATASETS,
+    datasets: Iterable[str] = DEFAULT_FUTURES_DATASETS,
     meta_db_path: Optional[str | Path] = None,
     timeframe_filter: str = "1m",
     liquidity_only: bool = False,

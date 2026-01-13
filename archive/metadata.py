@@ -1,16 +1,20 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Sequence
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import duckdb
 
-FUTURES_DATASETS_WITH_TIMEFRAME = {"klines", "mark", "index"}
-FUTURES_DATASETS_NO_TIMEFRAME = {"funding"}
-DEFAULT_FUTURES_DATASETS = ("klines", "mark", "index", "funding")
+from kucoin_lake.constants import DEFAULT_FUTURES_DATASETS, FUTURES_DATASETS_WITH_TIMEFRAME
+from kucoin_lake.paths import dataset_glob
+from kucoin_lake.util import expected_rows_for_day
 
 DEFAULT_META_SUBDIR = "_meta"
 DEFAULT_META_DBNAME = "metadata.duckdb"
@@ -24,30 +28,6 @@ def default_local_meta_db_path(market: str) -> Path:
     base.mkdir(parents=True, exist_ok=True)
     return base / f"metadata_{market}.duckdb"
 
-def parse_tf_minutes(tf: Optional[str]) -> Optional[int]:
-    if tf is None:
-        return None
-    m = re.fullmatch(r"(\d+)([mhd])", tf.strip().lower())
-    if not m:
-        return None
-    n = int(m.group(1))
-    u = m.group(2)
-    if u == "m":
-        return n
-    if u == "h":
-        return n * 60
-    if u == "d":
-        return n * 1440
-    return None
-
-
-def expected_rows_for_day(tf: Optional[str]) -> Optional[int]:
-    mins = parse_tf_minutes(tf)
-    if mins is None or mins <= 0:
-        return None
-    if 1440 % mins != 0:
-        return None
-    return 1440 // mins
 
 
 @dataclass(frozen=True)
@@ -340,31 +320,6 @@ def is_first_run(con: duckdb.DuckDBPyConnection, market: str) -> bool:
     n = con.execute("SELECT COUNT(*) FROM md.md_partition_coverage WHERE market = ?;", [market]).fetchone()[0]
     return int(n) == 0
 
-def _partition_dir_for_timeframe(tf: str) -> str:
-    """
-    Filesystem partition key for a given timeframe.
-    Convention:
-      - raw 1m is partitioned by date=YYYY-MM-DD
-      - derived timeframes (1h, 4h, 1d, ...) are partitioned by month=YYYY-MM
-    """
-    return "date=*" if tf == "1m" else "month=*"
-
-
-def dataset_glob(nas_root: Path, market: str, dataset: str, timeframe: str = "*") -> str:
-    base = Path(nas_root) / market / dataset
-
-    if dataset in FUTURES_DATASETS_WITH_TIMEFRAME:
-        if timeframe == "*":
-            # Match BOTH partition styles under symbol=*
-            # - .../date=YYYY-MM-DD/data.parquet
-            # - .../month=YYYY-MM/data.parquet
-            return (base / "timeframe=*" / "symbol=*" / "**" / "data.parquet").as_posix()
-
-        part = _partition_dir_for_timeframe(timeframe)
-        return (base / f"timeframe={timeframe}" / "symbol=*" / part / "data.parquet").as_posix()
-
-    # datasets without timeframe (e.g. funding)
-    return (base / "symbol=*" / "date=*" / "data.parquet").as_posix()
 
 def bulk_refresh_coverage_first_run(
     con: duckdb.DuckDBPyConnection,

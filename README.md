@@ -122,6 +122,16 @@ Exact interfaces will evolve.
 The contracts in docs/ are considered stable.
 
 --------------------------------------------------------------------
+NOTEBOOK USAGE
+--------------------------------------------------------------------
+
+Minimal notebook-friendly entrypoints are available via the package:
+
+```python
+from kucoin_lake import build_metadata
+```
+
+--------------------------------------------------------------------
 WHO THIS IS FOR
 --------------------------------------------------------------------
 

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, Optional, Sequence, Any
+from typing import Any, Iterable, Optional, Sequence
 
-from archive import metadata as metadata_module
 from archive import nas_parquet_mirror as mirror_module
-from archive import resample as resample_module
+from kucoin_lake import metadata as metadata_module
+from kucoin_lake import resample as resample_module
 from kucoin_lake.constants import DEFAULT_FUTURES_DATASETS
 
 
@@ -21,7 +21,7 @@ def build_metadata(
     incremental_chunk_size: int = 5000,
 ) -> dict:
     """
-    Notebook-friendly wrapper for archive.metadata.build_or_update_metadata.
+    Notebook-friendly wrapper for kucoin_lake.metadata.build_or_update_metadata.
     """
     return metadata_module.build_or_update_metadata(
         nas_root,
@@ -52,7 +52,7 @@ def resample_1m_to_1d(
     verbose: bool = False,
 ) -> dict:
     """
-    Notebook-friendly wrapper for archive.resample.resample_bars (1m -> 1d).
+    Notebook-friendly wrapper for kucoin_lake.resample.resample_bars (1m -> 1d).
     """
     return resample_module.resample_bars(
         nas_root,

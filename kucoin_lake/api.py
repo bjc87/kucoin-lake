@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
 from archive import nas_parquet_mirror as mirror_module
+from kucoin_lake import fetch as fetch_module
 from kucoin_lake import metadata as metadata_module
 from kucoin_lake import resample as resample_module
 from kucoin_lake.constants import DEFAULT_FUTURES_DATASETS
@@ -101,5 +102,43 @@ def ingest_local_downloads_to_lake(
         include_index=include_index,
         local_root=root,
         show_progress=verbose,
+        verbose=verbose,
+    )
+
+
+def fetch_futures(
+    out_root: str | Path,
+    symbols: str | list[str],
+    datatype: str | list[str],
+    *,
+    timeframe: str = "1m",
+    start_date: str | None = None,
+    end_date: str | None = None,
+    days: int | None = None,
+    sleep_s: float = 0.02,
+    retries: int = 6,
+    backoff_s: float = 1.0,
+    timeout: tuple[float, float] = (10, 300),
+    dry_run: bool = False,
+    show_progress: bool = True,
+    verbose: bool = False,
+) -> dict:
+    """
+    Notebook-friendly wrapper for kucoin_lake.fetch.fetch_futures.
+    """
+    return fetch_module.fetch_futures(
+        out_root,
+        symbols,
+        datatype,
+        timeframe=timeframe,
+        start_date=start_date,
+        end_date=end_date,
+        days=days,
+        sleep_s=sleep_s,
+        retries=retries,
+        backoff_s=backoff_s,
+        timeout=timeout,
+        dry_run=dry_run,
+        show_progress=show_progress,
         verbose=verbose,
     )

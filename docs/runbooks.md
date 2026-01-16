@@ -322,5 +322,54 @@ resample_bars(
 ```
 
 --------------------------------------------------------------------
+12. FETCH + INGEST RUNBOOK
+--------------------------------------------------------------------
+
+Use the CLI to download futures ZIPs and then ingest them into the lake:
+
+```bash
+# 1) Fetch futures ZIPs
+kucoin-lake fetch-futures \
+  --out-root /Users/you/coding/data/kucoin \
+  --symbols BTCUSDTM \
+  --datatype klines mark index funding \
+  --days 3 \
+  --timeframe 1m
+
+# 2) Ingest ZIPs into the lake
+kucoin-lake ingest-local-downloads-to-lake \
+  --startdate 2026-01-01 \
+  --enddate 2026-01-03 \
+  --assets BTCUSDTM \
+  --timeframes 1m \
+  --local-root /Users/you/coding/data/kucoin/data
+```
+
+Expected download structure under the output root:
+
+```
+/Users/you/coding/data/kucoin/
+  data/
+    futures/
+      daily/
+        klines/
+          BTCUSDTM/
+            1m/
+              BTCUSDTM-1m-2026-01-01.zip
+              BTCUSDTM-1m-2026-01-02.zip
+        fundingRates/
+          BTCUSDTM/
+            BTCUSDTM-fundingRates-2026-01-01.zip
+        mark/
+          BTCUSDTM/
+            1m/
+              BTCUSDTM-1m-2026-01-01.zip
+        index/
+          BTCUSDTM/
+            1m/
+              BTCUSDTM-1m-2026-01-01.zip
+```
+
+--------------------------------------------------------------------
 END
 --------------------------------------------------------------------

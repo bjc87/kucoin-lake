@@ -115,6 +115,35 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ingest_parser.add_argument("--local-root")
     ingest_parser.add_argument("--verbose", action="store_true")
 
+    fetch_parser = subparsers.add_parser(
+        "fetch-futures",
+        help="Fetch KuCoin futures ZIPs to local storage.",
+    )
+    fetch_parser.add_argument("--out-root", required=True)
+    fetch_parser.add_argument("--symbols", nargs="+", required=True)
+    fetch_parser.add_argument("--datatype", nargs="+", required=True)
+    fetch_parser.add_argument("--timeframe", default="1m")
+    fetch_parser.add_argument("--start-date")
+    fetch_parser.add_argument("--end-date")
+    fetch_parser.add_argument("--days", type=int)
+    fetch_parser.add_argument("--sleep-s", type=float, default=0.02)
+    fetch_parser.add_argument("--retries", type=int, default=6)
+    fetch_parser.add_argument("--backoff-s", type=float, default=1.0)
+    fetch_parser.add_argument("--timeout", nargs=2, type=float, metavar=("CONNECT", "READ"), default=(10, 300))
+    fetch_parser.add_argument("--dry-run", action="store_true")
+    fetch_parser.add_argument(
+        "--show-progress",
+        dest="show_progress",
+        action="store_true",
+        default=True,
+    )
+    fetch_parser.add_argument(
+        "--no-progress",
+        dest="show_progress",
+        action="store_false",
+    )
+    fetch_parser.add_argument("--verbose", action="store_true")
+
     return parser.parse_args(argv)
 
 
@@ -170,6 +199,25 @@ def _handle_ingest(args: argparse.Namespace) -> dict:
     )
 
 
+def _handle_fetch_futures(args: argparse.Namespace) -> dict:
+    return api.fetch_futures(
+        args.out_root,
+        symbols=cast_sequence(args.symbols) or [],
+        datatype=cast_sequence(args.datatype) or [],
+        timeframe=args.timeframe,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        days=args.days,
+        sleep_s=args.sleep_s,
+        retries=args.retries,
+        backoff_s=args.backoff_s,
+        timeout=tuple(args.timeout),
+        dry_run=args.dry_run,
+        show_progress=args.show_progress,
+        verbose=args.verbose,
+    )
+
+
 def cast_iterable(values: Sequence[str] | None) -> Iterable[str] | None:
     if values is None:
         return None
@@ -190,6 +238,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = _handle_resample(args)
     elif args.command == "ingest-local-downloads-to-lake":
         result = _handle_ingest(args)
+    elif args.command == "fetch-futures":
+        result = _handle_fetch_futures(args)
     else:
         raise ValueError(f"Unknown command: {args.command}")
 

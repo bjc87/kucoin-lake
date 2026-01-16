@@ -4,10 +4,20 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-__all__ = ["build_metadata", "resample_1m_to_1d", "ingest_local_downloads_to_lake"]
+__all__ = [
+    "build_metadata",
+    "resample_1m_to_1d",
+    "ingest_local_downloads_to_lake",
+    "fetch_futures",
+]
 
 if TYPE_CHECKING:
-    from .api import build_metadata, ingest_local_downloads_to_lake, resample_1m_to_1d
+    from .api import (
+        build_metadata,
+        fetch_futures,
+        ingest_local_downloads_to_lake,
+        resample_1m_to_1d,
+    )
 
 
 def __getattr__(name: str):

@@ -63,6 +63,17 @@ def _as_list(x: str | list[str] | tuple[str, ...]) -> list[str]:
     return [x]
 
 
+def _normalize_datatype(dt: str) -> DataType:
+    dt_norm = dt.strip()
+    if dt_norm.lower() == "fundingrates":
+        return "funding"
+    if dt_norm in DATASETS:
+        return dt_norm  # type: ignore[return-value]
+    raise ValueError(
+        f"Unknown datatype '{dt}'. Expected one of {sorted(DATASETS)} or 'fundingRates'."
+    )
+
+
 # -----------------------------
 # S3-style listing (single page)
 # -----------------------------
@@ -276,7 +287,7 @@ def missing_keys(out_root: Path, keys: list[str]) -> list[str]:
 def fetch_futures(
     out_root: str | Path,
     symbols: str | list[str],
-    datatype: DataType | list[DataType],
+    datatype: DataType | list[DataType] | str | list[str],
     *,
     timeframe: str = "1m",
     start_date: str | None = None,
@@ -294,7 +305,7 @@ def fetch_futures(
     Fetch KuCoin historical futures daily zips for given symbols + datatypes over a date window.
 
     - symbols: "XAIUSDTM" or ["BTCUSDTM", ...]
-    - datatype: "klines" | "funding" | "mark" | "index" or list of those
+    - datatype: "klines" | "funding" | "mark" | "index" (or "fundingRates") or list of those
     - window: either days=int OR (start_date, end_date) as "YYYY-MM-DD"
     - avoids re-downloading files that already exist under out_root/<bucket-key>
     - normalises XBT* -> BTC* (only at start of symbol string)
@@ -305,7 +316,8 @@ def fetch_futures(
     out_root.mkdir(parents=True, exist_ok=True)
 
     syms = sorted(set(normalize_symbol(s) for s in _as_list(symbols)))
-    dts: list[DataType] = _as_list(datatype)  # type: ignore
+    dts_raw = _as_list(datatype)  # type: ignore[arg-type]
+    dts: list[DataType] = [_normalize_datatype(dt) for dt in dts_raw]
 
     start, end = _resolve_date_range(start_date=start_date, end_date=end_date, days=days)
 

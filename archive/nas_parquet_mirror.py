@@ -207,6 +207,52 @@ def build_done_set(
     return done
 
 
+def _expected_out_path(dataset: str, zip_path: Path) -> Path:
+    if dataset == "klines":
+        asset = zip_path.parent.parent.name
+        timeframe = zip_path.parent.name
+        date_str = parsedate_from_stem(zip_path)
+        return out_path_klines(asset, timeframe, date_str)
+    if dataset == "funding":
+        asset = zip_path.parent.name
+        date_str = parsedate_from_stem(zip_path)
+        return out_path_funding(asset, date_str)
+    if dataset == "mark":
+        asset = zip_path.parent.parent.name
+        timeframe = zip_path.parent.name
+        date_str = parsedate_from_stem(zip_path)
+        return out_path_mark(asset, timeframe, date_str)
+    if dataset == "index":
+        asset = zip_path.parent.parent.name
+        timeframe = zip_path.parent.name
+        date_str = parsedate_from_stem(zip_path)
+        return out_path_index(asset, timeframe, date_str)
+    raise ValueError(f"Unknown dataset: {dataset}")
+
+
+def build_done_set_from_targets(
+    *,
+    klines_zips: list[Path],
+    funding_zips: list[Path],
+    mark_zips: list[Path],
+    index_zips: list[Path],
+    nas_root: Path = NAS_ROOT,
+) -> set[str]:
+    done: set[str] = set()
+    targets = [
+        ("klines", klines_zips),
+        ("funding", funding_zips),
+        ("mark", mark_zips),
+        ("index", index_zips),
+    ]
+    for dataset, zips in targets:
+        for zp in zips:
+            out_path = _expected_out_path(dataset, zp)
+            if out_path.exists():
+                done.add(out_path.relative_to(nas_root).as_posix())
+    return done
+
+
 def atomic_copy_to_parquet(
     con: duckdb.DuckDBPyConnection,
     select_sql: str,
@@ -273,6 +319,10 @@ def detect_delim(csv_path: Path) -> str:
 # Sharding
 # -----------------------------
 
+def _resolve_local_daily_root(root: Path) -> Path:
+    candidate = root / "futures/daily"
+    return candidate if candidate.exists() else root
+
 def list_local_ohlc_zips_sharded(
     root: Path,
     dataset: str,          # "klines" | "mark" | "index"
@@ -283,10 +333,12 @@ def list_local_ohlc_zips_sharded(
 ) -> list[Path]:
     """
     Local layout:
-      root/dataset/SYMBOL/TIMEFRAME/SYMBOL-TIMEFRAME-YYYY-MM-DD.zip
+      {root}/futures/daily/dataset/SYMBOL/TIMEFRAME/SYMBOL-TIMEFRAME-YYYY-MM-DD.zip
+      (or if root already points at futures/daily, root/dataset/...)
     Uses month globbing to avoid rglob over everything.
     """
-    ds_root = root / dataset
+    base_root = _resolve_local_daily_root(root)
+    ds_root = base_root / dataset
     if not ds_root.exists():
         return []
 
@@ -329,9 +381,11 @@ def list_local_funding_zips_sharded(
 ) -> list[Path]:
     """
     Local layout:
-      root/fundingRates/SYMBOL/SYMBOL-fundingRates-YYYY-MM-DD.zip
+      {root}/futures/daily/fundingRates/SYMBOL/SYMBOL-fundingRates-YYYY-MM-DD.zip
+      (or if root already points at futures/daily, root/fundingRates/...)
     """
-    ds_root = root / "fundingRates"
+    base_root = _resolve_local_daily_root(root)
+    ds_root = base_root / "fundingRates"
     if not ds_root.exists():
         return []
 
@@ -1468,6 +1522,7 @@ def run_ingest(
     include_funding: bool = True,
     include_mark: bool = True,
     include_index: bool = True,
+    done_set_mode: str = "scan",
     local_root: Path = LOCAL_ROOT,
     show_progress: bool = True,
     verbose: bool = False,
@@ -1476,8 +1531,12 @@ def run_ingest(
     Jupyter-first ingest API.
 
     - Filters by date range (inclusive), assets, and timeframes.
-    - Safe to rerun: skips anything already written (done-set) and uses atomic writes.
+    - Safe to rerun: can skip anything already written (done-set) and uses atomic writes.
     - Logs failures to ERRORS_LOG.
+    - done_set_mode:
+        - "scan": build done-set by scanning the NAS (safer, slower on large lakes)
+        - "targets": build done-set only from the planned zip targets (fast for small runs)
+        - "skip": do not build done-set (fastest; existing outputs will be overwritten)
 
     Dates must be ISO 'YYYY-MM-DD' if provided.
     """
@@ -1507,9 +1566,29 @@ def run_ingest(
     if include_mark: datasets.add("mark")
     if include_index: datasets.add("index")
 
-    if verbose:
-        print("Building done set...")
-    done = build_done_set(datasets=datasets)
+    done_set_mode = done_set_mode.lower()
+    if done_set_mode == "scan":
+        if verbose:
+            print("Building done set (scan)...")
+        done = build_done_set(datasets=datasets)
+    elif done_set_mode == "targets":
+        if verbose:
+            print("Building done set (targets)...")
+        done = build_done_set_from_targets(
+            klines_zips=klines_zips,
+            funding_zips=funding_zips,
+            mark_zips=mark_zips,
+            index_zips=index_zips,
+        )
+    elif done_set_mode == "skip":
+        if verbose:
+            print("Skipping done set build...")
+        done = set()
+    else:
+        raise ValueError(
+            "done_set_mode must be one of: 'scan', 'targets', 'skip'. "
+            f"Got: {done_set_mode}"
+        )
     if verbose:
         print(f"Done set built ({len(done):,} parquet files)")
 
@@ -1536,6 +1615,7 @@ def run_ingest(
             "include_funding": include_funding,
             "include_mark": include_mark,
             "include_index": include_index,
+            "done_set_mode": done_set_mode,
         },
         "resolved_window": {"start": start.isoformat(), "end": end.isoformat()},
         "targets": {

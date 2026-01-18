@@ -84,6 +84,7 @@ def ingest_local_downloads_to_lake(
     include_funding: bool = True,
     include_mark: bool = True,
     include_index: bool = True,
+    done_set_mode: str = "scan",
     local_root: Optional[str | Path] = None,
     verbose: bool = False,
 ) -> dict:
@@ -100,6 +101,7 @@ def ingest_local_downloads_to_lake(
         include_funding=include_funding,
         include_mark=include_mark,
         include_index=include_index,
+        done_set_mode=done_set_mode,
         local_root=root,
         show_progress=verbose,
         verbose=verbose,

@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
-from archive import nas_parquet_mirror as mirror_module
+from kucoin_lake import nas_parquet_mirror as mirror_module
 from kucoin_lake import fetch as fetch_module
 from kucoin_lake import metadata as metadata_module
 from kucoin_lake import resample as resample_module

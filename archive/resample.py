@@ -10,7 +10,7 @@ from typing import Any, Optional, Sequence, Union
 
 import duckdb
 
-from nas_parquet_mirror import LOCAL_STAGE_ROOT, atomic_copy_to_parquet
+from kucoin_lake.nas_parquet_mirror import LOCAL_STAGE_ROOT, atomic_copy_to_parquet
 
 # -----------------------------
 # Partition parsing helpers

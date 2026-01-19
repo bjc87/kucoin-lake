@@ -865,11 +865,12 @@ def convert_funding_zip(
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             csv_path = extract_single_csv(zip_path, td_path)
-            fields = read_header_fields(csv_path, ",")
-            expected = {"open", "high", "low", "close"}
+            delim = detect_delim(csv_path)
+            fields = read_header_fields(csv_path, delim)
+            expected = {"symbol", "time", "fundingRate"}
             if not expected.issubset(fields):
                 raise ValueError(
-                    "Unexpected schema for mark zip: expected columns "
+                    "Unexpected schema for funding zip: expected columns "
                     f"{sorted(expected)} but got: {fields}"
                 )
 
@@ -881,7 +882,7 @@ def convert_funding_zip(
                     CAST(fundingRate AS DOUBLE) AS funding_rate
                 FROM read_csv(
                     '{csv_path.as_posix()}',
-                    delim=',',
+                    delim='{delim}',
                     header=true,
                     auto_detect=false,
                     strict_mode=false,

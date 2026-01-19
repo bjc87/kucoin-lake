@@ -76,6 +76,8 @@ def format_summary(name: str, c: RunCounters) -> str:
 # Helpers
 # -----------------------------
 
+DATASET_DIRS = ("klines", "fundingRates", "mark", "index")
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -119,6 +121,29 @@ def extract_single_csv(zip_path: Path, tmp_dir: Path) -> Path:
     if len(csvs) != 1:
         raise RuntimeError(f"Expected 1 CSV in {zip_path}, found {len(csvs)}: {csvs}")
     return csvs[0]
+
+def _has_dataset_dirs(root: Path) -> bool:
+    return any((root / ds).is_dir() for ds in DATASET_DIRS)
+
+def resolve_local_download_root(local_root: Path, market: str | None = None) -> Path:
+    if _has_dataset_dirs(local_root):
+        return local_root
+
+    market_name = market or "futures"
+    market_daily = local_root / market_name / "daily"
+    if _has_dataset_dirs(market_daily):
+        return market_daily
+
+    futures_daily = local_root / "futures" / "daily"
+    if _has_dataset_dirs(futures_daily):
+        return futures_daily
+
+    expected = ", ".join(DATASET_DIRS)
+    raise ValueError(
+        "Could not resolve local download root. Expected dataset directories "
+        f"({expected}) directly under {local_root}, or under "
+        f"{local_root}/<market>/daily (market={market_name})."
+    )
 
 # def expected_out_path(zip_path: Path) -> Path:
 #     """
@@ -1323,6 +1348,7 @@ def resolvedates_ingest_strict(
 def build_zip_targets_ingest_strict(
     local_root: str | Path,
     *,
+    market: str | None = None,
     startdate: str,
     enddate: str,
     assets: list[str] | None = None,
@@ -1341,7 +1367,7 @@ def build_zip_targets_ingest_strict(
     Returns:
       (klines_zips, funding_zips, mark_zips, index_zips, start, end)
     """
-    local_root = Path(local_root)
+    local_root = resolve_local_download_root(Path(local_root), market)
     start, end = resolvedates_ingest_strict(startdate=startdate, enddate=enddate)
 
     klines_zips = (
@@ -1515,6 +1541,7 @@ def run_ingest(
     include_mark: bool = True,
     include_index: bool = True,
     done_set_mode: str = "scan",
+    market: str | None = None,
     local_root: Path = LOCAL_ROOT,
     show_progress: bool = True,
     verbose: bool = False,
@@ -1542,6 +1569,7 @@ def run_ingest(
 
     klines_zips, funding_zips, mark_zips, index_zips, start, end = build_zip_targets_ingest_strict(
         local_root,
+        market=market,
         startdate=startdate,
         enddate=enddate,
         assets=assets,

@@ -343,6 +343,10 @@ kucoin-lake ingest-local-downloads-to-lake \
   --assets BTCUSDTM \
   --timeframes 1m \
   --local-root /Users/you/coding/data/kucoin/data
+
+# local-root can be either the daily root itself or its parent:
+# - /Users/you/coding/data/kucoin/data/futures/daily
+# - /Users/you/coding/data/kucoin/data (contains futures/daily)
 ```
 
 Expected download structure under the output root:

@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from kucoin_lake.nas_parquet_mirror import build_zip_targets_ingest_strict
+from kucoin_lake.ingest import build_zip_targets_ingest_strict
 
 
 def _touch(path: Path) -> None:

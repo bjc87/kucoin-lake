@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import glob
 import os
 import re
 from dataclasses import dataclass
@@ -94,6 +95,58 @@ def _dataset_root_glob(
     return (nas_root / market / dataset / f"timeframe={timeframe}" / "symbol=*" / "date=*" / "data.parquet").as_posix()
 
 
+def _build_source_globs(
+    nas_root: Path,
+    market: str,
+    dataset: str,
+    timeframe_src: str,
+    *,
+    symbols: Optional[Sequence[str]] = None,
+    months: Optional[Sequence[str]] = None,
+) -> list[str]:
+    base = nas_root / market / dataset / f"timeframe={timeframe_src}"
+    globs: list[str] = []
+    if symbols and months:
+        for sym in symbols:
+            for month in months:
+                globs.append((base / f"symbol={sym}" / f"date={month}-*" / "data.parquet").as_posix())
+        return globs
+    if symbols:
+        for sym in symbols:
+            globs.append((base / f"symbol={sym}" / "date=*" / "data.parquet").as_posix())
+        return globs
+    if months:
+        for month in months:
+            globs.append((base / "symbol=*" / f"date={month}-*" / "data.parquet").as_posix())
+        return globs
+    globs.append((base / "symbol=*" / "date=*" / "data.parquet").as_posix())
+    return globs
+
+
+def _list_source_parquet_files(
+    nas_root: Path,
+    market: str,
+    dataset: str,
+    timeframe_src: str,
+    *,
+    symbols: Optional[Sequence[str]] = None,
+    months: Optional[Sequence[str]] = None,
+) -> list[str]:
+    globs = _build_source_globs(
+        nas_root,
+        market,
+        dataset,
+        timeframe_src,
+        symbols=symbols,
+        months=months,
+    )
+    matches: set[str] = set()
+    for pattern in globs:
+        for match in glob.glob(pattern):
+            matches.add(Path(match).as_posix())
+    return sorted(matches)
+
+
 def plan_resample_tasks(
     nas_root: Union[str, Path],
     *,
@@ -135,18 +188,42 @@ def plan_resample_tasks(
                 continue
             tasks_set.add((sym, _month_str(d)))
     else:
-        # Bulk: scan existing src files via DuckDB hive partitions (cheap)
-        glob = _dataset_root_glob(nas_root, market, dataset, timeframe_src)
-        con = duckdb.connect(":memory:")
-        try:
-            rows = con.execute(
-                f"""
-                SELECT DISTINCT symbol, CAST(date AS VARCHAR) AS d
-                FROM read_parquet('{glob}', hive_partitioning=1, filename=0)
-                """
-            ).fetchall()
-        finally:
-            con.close()
+        if symbols is not None or months is not None:
+            file_list = _list_source_parquet_files(
+                nas_root,
+                market,
+                dataset,
+                timeframe_src,
+                symbols=symbols,
+                months=months,
+            )
+            if not file_list:
+                return []
+            con = duckdb.connect(":memory:")
+            try:
+                rows = con.execute(
+                    """
+                    SELECT DISTINCT symbol, CAST(date AS VARCHAR) AS d
+                    FROM read_parquet($1, hive_partitioning=1, filename=1)
+                    WHERE timeframe = $2
+                    """,
+                    [file_list, timeframe_src],
+                ).fetchall()
+            finally:
+                con.close()
+        else:
+            # Bulk: scan existing src files via DuckDB hive partitions (cheap)
+            glob_pattern = _dataset_root_glob(nas_root, market, dataset, timeframe_src)
+            con = duckdb.connect(":memory:")
+            try:
+                rows = con.execute(
+                    f"""
+                    SELECT DISTINCT symbol, CAST(date AS VARCHAR) AS d
+                    FROM read_parquet('{glob_pattern}', hive_partitioning=1, filename=0)
+                    """
+                ).fetchall()
+            finally:
+                con.close()
 
         for sym, d in rows:
             if sym and d:

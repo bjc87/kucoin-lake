@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import glob as globlib
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -188,6 +189,11 @@ def bulk_refresh_coverage_first_run(
         if ds in FUTURES_DATASETS_WITH_TIMEFRAME:
             glob = dataset_glob(nas_root, market, ds, timeframe=timeframe_filter)
             expected = expected_rows_for_day(timeframe_filter)
+            sample_paths = glob and globlib.glob(glob)
+            if not sample_paths:
+                continue
+            day_key_expr = _day_key_expr_from_parquet(con, sample_paths[0])
+            distinct_ts_col, min_ts_col, max_ts_col = _coverage_ts_cols_from_parquet(con, sample_paths[0])
 
             con.execute(f"""
             INSERT INTO md.md_partition_coverage
@@ -195,13 +201,13 @@ def bulk_refresh_coverage_first_run(
                 '{market}' AS market,
                 '{ds}' AS dataset,
                 symbol,
-                CAST(ts AS DATE) AS date,
+                {day_key_expr} AS date,
                 '{timeframe_filter}'::VARCHAR AS timeframe,
                 COUNT(DISTINCT filename)::UBIGINT AS num_files,
                 COUNT(*)::UBIGINT AS num_rows,
-                COUNT(DISTINCT date_trunc('minute', ts))::UBIGINT AS distinct_minute_cnt,
-                MIN(ts) AS min_ts,
-                MAX(ts) AS max_ts,
+                COUNT(DISTINCT date_trunc('minute', {distinct_ts_col}))::UBIGINT AS distinct_minute_cnt,
+                MIN({min_ts_col}) AS min_ts,
+                MAX({max_ts_col}) AS max_ts,
                 {expected if expected is not None else 'NULL'}::INTEGER AS expected_rows,
                 CASE WHEN {expected if expected is not None else 'NULL'} IS NULL
                     THEN NULL
@@ -214,7 +220,7 @@ def bulk_refresh_coverage_first_run(
                 CAST('{now}' AS TIMESTAMP) AS computed_at_utc
             FROM read_parquet('{glob}', hive_partitioning=1, filename=1)
             WHERE timeframe = '{timeframe_filter}'
-            GROUP BY symbol, CAST(ts AS DATE);
+            GROUP BY symbol, {day_key_expr}, timeframe;
             """)
         else:
             glob = dataset_glob(nas_root, market, ds)
@@ -268,6 +274,14 @@ def incremental_refresh_coverage_for_files(
 
         con.execute("CREATE TEMP TABLE _stg_cov AS SELECT * FROM md.md_partition_coverage WHERE 1=0;")
 
+        day_key_expr = None
+        distinct_ts_col = None
+        min_ts_col = None
+        max_ts_col = None
+        if ds in FUTURES_DATASETS_WITH_TIMEFRAME and paths:
+            day_key_expr = _day_key_expr_from_parquet(con, paths[0])
+            distinct_ts_col, min_ts_col, max_ts_col = _coverage_ts_cols_from_parquet(con, paths[0])
+
         for batch in chunked(paths, chunk_size):
             arr = "[" + ",".join("'" + p.replace("'", "''") + "'" for p in batch) + "]"
 
@@ -281,13 +295,13 @@ def incremental_refresh_coverage_for_files(
                         '{market}' AS market,
                         '{ds}' AS dataset,
                         symbol,
-                        CAST(ts AS DATE),
+                        {day_key_expr} AS date,
                         '{timeframe_filter}'::VARCHAR AS timeframe,
                         COUNT(DISTINCT filename)::UBIGINT AS num_files,
                         COUNT(*)::UBIGINT AS num_rows,
-                        COUNT(DISTINCT date_trunc('minute', ts))::UBIGINT AS distinct_minute_cnt,
-                        MIN(ts) AS min_ts,
-                        MAX(ts) AS max_ts,
+                        COUNT(DISTINCT date_trunc('minute', {distinct_ts_col}))::UBIGINT AS distinct_minute_cnt,
+                        MIN({min_ts_col}) AS min_ts,
+                        MAX({max_ts_col}) AS max_ts,
                         {expected if expected is not None else 'NULL'}::INTEGER AS expected_rows,
                         CASE WHEN {expected if expected is not None else 'NULL'} IS NULL
                             THEN NULL
@@ -300,7 +314,7 @@ def incremental_refresh_coverage_for_files(
                         CAST('{now}' AS TIMESTAMP) AS computed_at_utc
                     FROM read_parquet({arr}, hive_partitioning=1, filename=1)
                     WHERE timeframe = '{timeframe_filter}'
-                    GROUP BY symbol, CAST(ts AS DATE);
+                    GROUP BY symbol, {day_key_expr}, timeframe;
                     """
                 )
 
@@ -576,12 +590,44 @@ def _safe_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _parquet_columns(con: duckdb.DuckDBPyConnection, sample_file: str) -> set[str]:
+    cols = con.execute("SELECT column_name FROM parquet_schema(?);", [sample_file]).fetchall()
+    return {c[0].lower() for c in cols}
+
+
+def _day_key_expr_from_parquet(con: duckdb.DuckDBPyConnection, sample_file: str) -> str:
+    """
+    Determine the day key expression for a parquet schema.
+    Prefer DATE-typed `date` if present, else CAST(ts AS DATE), else CAST(day AS DATE).
+    """
+    colnames = _parquet_columns(con, sample_file)
+    if "date" in colnames:
+        return "date"
+    if "ts" in colnames:
+        return "CAST(ts AS DATE)"
+    if "day" in colnames:
+        return "CAST(day AS DATE)"
+    raise ValueError(f"Could not infer day key for parquet: columns={sorted(colnames)}")
+
+
+def _coverage_ts_cols_from_parquet(con: duckdb.DuckDBPyConnection, sample_file: str) -> tuple[str, str, str]:
+    colnames = _parquet_columns(con, sample_file)
+    if "ts" in colnames:
+        return "ts", "ts", "ts"
+    min_ts = "min_ts" if "min_ts" in colnames else None
+    max_ts = "max_ts" if "max_ts" in colnames else None
+    distinct_ts = min_ts or max_ts
+    if distinct_ts is None:
+        raise ValueError(f"Could not infer timestamp columns for parquet: columns={sorted(colnames)}")
+    return distinct_ts, (min_ts or distinct_ts), (max_ts or distinct_ts)
+
+
 def _detect_kline_cols(con: duckdb.DuckDBPyConnection, sample_file: str) -> tuple[str, str, str]:
     """
-    Detect (ts_col, close_col, volume_col) from a sample parquet file.
+    Detect (time_col, close_col, volume_col) from a sample parquet file.
     We try a few common variants.
 
-    Returns: (ts_col, close_col, volume_col)
+    Returns: (time_col, close_col, volume_col)
     Raises if it can't find required columns.
     """
     # DuckDB can describe a parquet file as a relation.
@@ -589,22 +635,22 @@ def _detect_kline_cols(con: duckdb.DuckDBPyConnection, sample_file: str) -> tupl
     colnames = {c[0].lower() for c in cols}
 
     # Timestamp column (you've used ts everywhere so far)
-    ts_candidates = ["ts", "timestamp", "time"]
+    ts_candidates = ["ts", "timestamp", "time", "max_ts", "min_ts", "date", "day"]
     close_candidates = ["close", "c"]
     vol_candidates = ["volume", "vol", "qty", "size", "base_volume"]
 
-    ts_col = next((c for c in ts_candidates if c in colnames), None)
+    time_col = next((c for c in ts_candidates if c in colnames), None)
     close_col = next((c for c in close_candidates if c in colnames), None)
     vol_col = next((c for c in vol_candidates if c in colnames), None)
 
-    if ts_col is None:
-        raise ValueError(f"Could not find timestamp column in klines parquet: columns={sorted(colnames)}")
+    if time_col is None:
+        raise ValueError(f"Could not find time column in klines parquet: columns={sorted(colnames)}")
     if close_col is None:
         raise ValueError(f"Could not find close column in klines parquet: columns={sorted(colnames)}")
     if vol_col is None:
         raise ValueError(f"Could not find volume column in klines parquet: columns={sorted(colnames)}")
 
-    return ts_col, close_col, vol_col
+    return time_col, close_col, vol_col
 
 
 def _paths_for_changed_klines(
@@ -631,7 +677,8 @@ def _compute_base_liquidity_from_paths(
     paths: Sequence[str],
     *,
     timeframe_filter: str,
-    ts_col: str,
+    time_col: str,
+    day_key_expr: str,
     close_col: str,
     vol_col: str,
     chunk_size: int = 5000,
@@ -640,7 +687,7 @@ def _compute_base_liquidity_from_paths(
     Compute daily base liquidity metrics for the provided klines parquet file paths and upsert into md.md_liquidity_daily:
       - dollar_volume = sum(close * volume)
       - volume = sum(volume)
-      - close_price = last close by ts
+      - close_price = last close by time column
     """
     if not paths:
         return
@@ -659,11 +706,11 @@ def _compute_base_liquidity_from_paths(
                 '{market}' AS market,
                 '{timeframe_filter}' AS timeframe,
                 symbol,
-                CAST({ts_col} AS DATE) AS day,
+                {day_key_expr} AS date,
 
                 SUM(CAST({close_col} AS DOUBLE) * CAST({vol_col} AS DOUBLE)) AS dollar_volume,
                 SUM(CAST({vol_col} AS DOUBLE)) AS volume,
-                ARG_MAX(CAST({close_col} AS DOUBLE), CAST({ts_col} AS TIMESTAMP)) AS close_price,
+                ARG_MAX(CAST({close_col} AS DOUBLE), CAST({time_col} AS TIMESTAMP)) AS close_price,
 
                 NULL::DOUBLE AS dv_30d_median,
                 NULL::INTEGER AS liquidity_rank_30d,
@@ -672,7 +719,7 @@ def _compute_base_liquidity_from_paths(
                 {_utc_now_ts_expr()} AS computed_at_utc
             FROM read_parquet({arr}, hive_partitioning=1, filename=0)
             WHERE timeframe = '{timeframe_filter}'
-            GROUP BY symbol, day;
+            GROUP BY symbol, {day_key_expr};
             """
         )
 
@@ -826,7 +873,8 @@ def build_or_update_liquidity_daily(
         return {"ok": False, "reason": "No klines parquet files found for sampling", "market": market}
 
     sample_file = sample[0]
-    ts_col, close_col, vol_col = _detect_kline_cols(con, sample_file)
+    time_col, close_col, vol_col = _detect_kline_cols(con, sample_file)
+    day_key_expr = _day_key_expr_from_parquet(con, sample_file)
 
     # Is this the first run for liquidity?
     first_run = is_first_run_liquidity_for_timeframe(con, market=market, timeframe=timeframe_filter)
@@ -846,11 +894,11 @@ def build_or_update_liquidity_daily(
                 '{market}' AS market,
                 '{timeframe_filter}' AS timeframe,
                 symbol,
-                CAST({ts_col} AS DATE) AS date,
+                {day_key_expr} AS date,
 
                 SUM(CAST({close_col} AS DOUBLE) * CAST({vol_col} AS DOUBLE)) AS dollar_volume,
                 SUM(CAST({vol_col} AS DOUBLE)) AS volume,
-                ARG_MAX(CAST({close_col} AS DOUBLE), CAST({ts_col} AS TIMESTAMP)) AS close_price,
+                ARG_MAX(CAST({close_col} AS DOUBLE), CAST({time_col} AS TIMESTAMP)) AS close_price,
 
                 NULL::DOUBLE AS dv_30d_median,
                 NULL::INTEGER AS liquidity_rank_30d,
@@ -859,7 +907,7 @@ def build_or_update_liquidity_daily(
                 {_utc_now_ts_expr()} AS computed_at_utc
             FROM read_parquet('{glob}', hive_partitioning=1, filename=0)
             WHERE timeframe = '{timeframe_filter}'
-            GROUP BY symbol, CAST({ts_col} AS DATE);
+            GROUP BY symbol, {day_key_expr};
             """
         )
 
@@ -910,7 +958,8 @@ def build_or_update_liquidity_daily(
         market,
         changed_paths,
         timeframe_filter=timeframe_filter,
-        ts_col=ts_col,
+        time_col=time_col,
+        day_key_expr=day_key_expr,
         close_col=close_col,
         vol_col=vol_col,
         chunk_size=incremental_chunk_size,
@@ -923,7 +972,7 @@ def build_or_update_liquidity_daily(
         f"""
         CREATE TEMP TABLE _chg_dates AS
         SELECT DISTINCT
-        CAST({ts_col} AS DATE) AS date
+        {day_key_expr} AS date
         FROM read_parquet($1, hive_partitioning=1);
         """,
         [changed_paths],
@@ -961,3 +1010,31 @@ def build_or_update_liquidity_daily(
         "lookback_days": lookback_days,
         "top_n": top_n,
     }
+
+
+def demo_day_key_expr(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    sample_1m: str,
+    sample_1d: str,
+) -> dict[str, str]:
+    """
+    Developer sanity helper: show day key expressions for 1m vs 1d schemas.
+    Runs a tiny coverage-style query for the 1d sample to validate the expression.
+    """
+    expr_1m = _day_key_expr_from_parquet(con, sample_1m)
+    expr_1d = _day_key_expr_from_parquet(con, sample_1d)
+
+    con.execute(
+        f"""
+        SELECT
+            symbol,
+            {expr_1d} AS date
+        FROM read_parquet(?, hive_partitioning=1)
+        GROUP BY symbol, {expr_1d}
+        LIMIT 1;
+        """,
+        [sample_1d],
+    )
+
+    return {"1m": expr_1m, "1d": expr_1d}

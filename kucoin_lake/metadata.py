@@ -591,8 +591,16 @@ def _safe_ident(name: str) -> str:
 
 
 def _parquet_columns(con: duckdb.DuckDBPyConnection, sample_file: str) -> set[str]:
-    cols = con.execute("SELECT column_name FROM parquet_schema(?);", [sample_file]).fetchall()
-    return {c[0].lower() for c in cols}
+    cur = con.execute("SELECT * FROM parquet_schema(?);", [sample_file])
+    rows = cur.fetchall()
+    colnames = [c[0] for c in cur.description]
+    if "name" in colnames:
+        idx = colnames.index("name")
+    elif "column_name" in colnames:
+        idx = colnames.index("column_name")
+    else:
+        raise ValueError(f"Could not find column name field in parquet_schema: columns={colnames}")
+    return {row[idx].lower() for row in rows if row[idx] is not None}
 
 
 def _day_key_expr_from_parquet(con: duckdb.DuckDBPyConnection, sample_file: str) -> str:

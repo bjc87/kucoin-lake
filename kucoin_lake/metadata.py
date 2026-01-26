@@ -1242,6 +1242,19 @@ def build_or_update_liquidity_daily(
     max_d = datetime.fromisoformat(dr[1]).date()
     date_from = min_d.isoformat()
     date_to = (max_d + timedelta(days=lookback_days - 1)).isoformat()
+    max_available = con.execute(
+        """
+        SELECT MAX(date)::VARCHAR
+        FROM md.md_liquidity_daily
+        WHERE market = ?
+          AND timeframe = ?;
+        """,
+        [market, timeframe_filter],
+    ).fetchone()
+    if max_available and max_available[0] is not None:
+        max_available_date = datetime.fromisoformat(max_available[0]).date()
+        if max_available_date < datetime.fromisoformat(date_to).date():
+            date_to = max_available_date.isoformat()
 
     _recompute_rolling_and_rank_for_date_range(
         con,

@@ -562,6 +562,31 @@ def build_or_update_metadata(
 
         if not liquidity_only:
             recompute_rollups(con, market=market, timeframe_filter=timeframe_filter)
+            if timeframe_filter == "1m":
+                integrity_summary = build_or_update_kline_integrity_day(
+                    nas_root,
+                    market=market,
+                    meta_db_path=meta_db_path,
+                    timeframe_filter=timeframe_filter,
+                    changed_files=changed,
+                    recompute=False,
+                    incremental_chunk_size=incremental_chunk_size,
+                    con=con,
+                )
+            else:
+                integrity_summary = {
+                    "ok": True,
+                    "market": market,
+                    "timeframe_filter": timeframe_filter,
+                    "mode": "skipped_non_1m_timeframe",
+                }
+        else:
+            integrity_summary = {
+                "ok": True,
+                "market": market,
+                "timeframe_filter": timeframe_filter,
+                "mode": "skipped_liquidity_only",
+            }
 
     finally:
         con.close()
@@ -577,6 +602,7 @@ def build_or_update_metadata(
         "coverage_mode": mode,
         "when_utc": utc_now_iso(),
         "liquidity": liq_summary,
+        "kline_integrity": integrity_summary,
     }
 
 
@@ -662,7 +688,7 @@ def _detect_kline_cols(con: duckdb.DuckDBPyConnection, sample_file: str) -> tupl
 
 
 def _paths_for_changed_klines(
-    files: Sequence[FileInfo],  # from your existing dataclass
+    files: Sequence[FileInfo | str],
     timeframe_filter: str,
 ) -> list[str]:
     """
@@ -672,11 +698,231 @@ def _paths_for_changed_klines(
     out = []
     needle = f"/klines/timeframe={timeframe_filter}/"
     for f in files:
-        if f.dataset != "klines":
-            continue
-        if needle in f.file_path.replace("\\", "/"):
-            out.append(f.file_path)
+        if isinstance(f, FileInfo):
+            if f.dataset != "klines":
+                continue
+            path = f.file_path
+        else:
+            path = str(f)
+        if needle in path.replace("\\", "/"):
+            out.append(path)
     return out
+
+
+def _detect_kline_ohlc_cols(
+    con: duckdb.DuckDBPyConnection,
+    sample_file: str,
+) -> tuple[str, str, str, str, str]:
+    cols = con.execute(f"DESCRIBE SELECT * FROM read_parquet('{sample_file}');").fetchall()
+    colnames = {c[0].lower() for c in cols}
+
+    ts_candidates = ["ts", "timestamp", "time"]
+    open_candidates = ["open", "o"]
+    high_candidates = ["high", "h"]
+    low_candidates = ["low", "l"]
+    close_candidates = ["close", "c"]
+
+    time_col = next((c for c in ts_candidates if c in colnames), None)
+    open_col = next((c for c in open_candidates if c in colnames), None)
+    high_col = next((c for c in high_candidates if c in colnames), None)
+    low_col = next((c for c in low_candidates if c in colnames), None)
+    close_col = next((c for c in close_candidates if c in colnames), None)
+
+    if time_col is None:
+        raise ValueError(f"Could not find time column in klines parquet: columns={sorted(colnames)}")
+    if open_col is None or high_col is None or low_col is None or close_col is None:
+        raise ValueError(f"Could not find OHLC columns in klines parquet: columns={sorted(colnames)}")
+
+    return time_col, open_col, high_col, low_col, close_col
+
+
+def build_or_update_kline_integrity_day(
+    nas_root: str | Path,
+    *,
+    market: str = "futures",
+    meta_db_path: Optional[str | Path] = None,
+    timeframe_filter: str = "1m",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    changed_files: Optional[Sequence[FileInfo | str]] = None,
+    recompute: bool = False,
+    incremental_chunk_size: int = 5000,
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> dict:
+    if timeframe_filter != "1m":
+        raise ValueError("Only timeframe_filter='1m' is supported for kline integrity checks.")
+
+    nas_root = Path(nas_root)
+    if meta_db_path is None and con is None:
+        meta_db_path = default_local_meta_db_path(market)
+
+    expected = expected_rows_for_day(timeframe_filter)
+    changed_paths: list[str] = []
+    if changed_files:
+        changed_paths = _paths_for_changed_klines(changed_files, timeframe_filter=timeframe_filter)
+
+    if not changed_paths and start_date is None and end_date is None and not recompute:
+        return {
+            "ok": True,
+            "market": market,
+            "timeframe_filter": timeframe_filter,
+            "mode": "no_op",
+            "reason": "No changed klines files or date range provided; skipping integrity build.",
+        }
+
+    owns_connection = False
+    if con is None:
+        con = connect_meta_db(Path(meta_db_path))
+        owns_connection = True
+
+    try:
+        if changed_paths:
+            sample_file = changed_paths[0]
+            source_rel = "read_parquet({arr}, hive_partitioning=1, filename=0)"
+        else:
+            glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)
+            sample = con.execute(
+                f"SELECT filename FROM read_parquet('{glob}', filename=1, hive_partitioning=1) LIMIT 1;"
+            ).fetchone()
+            if not sample:
+                return {
+                    "ok": False,
+                    "reason": "No klines parquet files found for sampling",
+                    "market": market,
+                }
+            sample_file = sample[0]
+            source_rel = f"read_parquet('{glob}', hive_partitioning=1, filename=0)"
+
+        time_col, open_col, high_col, low_col, close_col = _detect_kline_ohlc_cols(con, sample_file)
+        day_key_expr = _day_key_expr_from_parquet(con, sample_file)
+
+        con.execute("CREATE TEMP TABLE _stg_kline_integrity AS SELECT * FROM md.md_kline_integrity_day WHERE 1=0;")
+
+        if changed_paths:
+            for i in range(0, len(changed_paths), incremental_chunk_size):
+                batch = changed_paths[i : i + incremental_chunk_size]
+                arr = "[" + ",".join("'" + p.replace("'", "''") + "'" for p in batch) + "]"
+                con.execute(
+                    f"""
+                    INSERT INTO _stg_kline_integrity
+                    WITH base AS (
+                        SELECT
+                            symbol,
+                            {day_key_expr} AS day,
+                            CAST({time_col} AS TIMESTAMP) AS ts,
+                            CAST({open_col} AS DOUBLE) AS open,
+                            CAST({high_col} AS DOUBLE) AS high,
+                            CAST({low_col} AS DOUBLE) AS low,
+                            CAST({close_col} AS DOUBLE) AS close
+                        FROM {source_rel.format(arr=arr)}
+                        WHERE timeframe = '{timeframe_filter}'
+                    ),
+                    calc AS (
+                        SELECT
+                            symbol,
+                            day,
+                            ts,
+                            open,
+                            high,
+                            low,
+                            close,
+                            LAG(close) OVER (PARTITION BY symbol, day ORDER BY ts) AS prev_close
+                        FROM base
+                    )
+                    SELECT
+                        '{market}' AS market,
+                        symbol,
+                        day AS date,
+                        '{timeframe_filter}' AS timeframe,
+                        COUNT(*)::UBIGINT AS num_rows,
+                        COUNT(DISTINCT date_trunc('minute', ts))::UBIGINT AS distinct_minute_cnt,
+                        {expected} - COUNT(DISTINCT date_trunc('minute', ts)) AS gap_rows_vs_expected,
+                        COUNT(*) - COUNT(DISTINCT date_trunc('minute', ts)) AS duplicate_rows,
+                        SUM(CASE WHEN high < low THEN 1 ELSE 0 END)::UBIGINT AS high_lt_low_cnt,
+                        SUM(CASE WHEN open <= 0 OR high <= 0 OR low <= 0 OR close <= 0 THEN 1 ELSE 0 END)::UBIGINT
+                            AS nonpositive_price_cnt,
+                        MAX(ABS(close / prev_close - 1)) AS max_abs_ret_1m,
+                        {_utc_now_ts_expr()} AS computed_at_utc
+                    FROM calc
+                    GROUP BY symbol, day;
+                    """
+                )
+        else:
+            date_filter = ""
+            if start_date:
+                date_filter += f" AND {day_key_expr} >= CAST('{start_date}' AS DATE)"
+            if end_date:
+                date_filter += f" AND {day_key_expr} <= CAST('{end_date}' AS DATE)"
+            con.execute(
+                f"""
+                INSERT INTO _stg_kline_integrity
+                WITH base AS (
+                    SELECT
+                        symbol,
+                        {day_key_expr} AS day,
+                        CAST({time_col} AS TIMESTAMP) AS ts,
+                        CAST({open_col} AS DOUBLE) AS open,
+                        CAST({high_col} AS DOUBLE) AS high,
+                        CAST({low_col} AS DOUBLE) AS low,
+                        CAST({close_col} AS DOUBLE) AS close
+                    FROM {source_rel}
+                    WHERE timeframe = '{timeframe_filter}'{date_filter}
+                ),
+                calc AS (
+                    SELECT
+                        symbol,
+                        day,
+                        ts,
+                        open,
+                        high,
+                        low,
+                        close,
+                        LAG(close) OVER (PARTITION BY symbol, day ORDER BY ts) AS prev_close
+                    FROM base
+                )
+                SELECT
+                    '{market}' AS market,
+                    symbol,
+                    day AS date,
+                    '{timeframe_filter}' AS timeframe,
+                    COUNT(*)::UBIGINT AS num_rows,
+                    COUNT(DISTINCT date_trunc('minute', ts))::UBIGINT AS distinct_minute_cnt,
+                    {expected} - COUNT(DISTINCT date_trunc('minute', ts)) AS gap_rows_vs_expected,
+                    COUNT(*) - COUNT(DISTINCT date_trunc('minute', ts)) AS duplicate_rows,
+                    SUM(CASE WHEN high < low THEN 1 ELSE 0 END)::UBIGINT AS high_lt_low_cnt,
+                    SUM(CASE WHEN open <= 0 OR high <= 0 OR low <= 0 OR close <= 0 THEN 1 ELSE 0 END)::UBIGINT
+                        AS nonpositive_price_cnt,
+                    MAX(ABS(close / prev_close - 1)) AS max_abs_ret_1m,
+                    {_utc_now_ts_expr()} AS computed_at_utc
+                FROM calc
+                GROUP BY symbol, day;
+                """
+            )
+
+        row_count = con.execute("SELECT COUNT(*) FROM _stg_kline_integrity;").fetchone()[0]
+        if row_count:
+            con.execute(
+                """
+                DELETE FROM md.md_kline_integrity_day
+                WHERE market = ?
+                  AND timeframe = ?
+                  AND (symbol, date) IN (SELECT symbol, date FROM _stg_kline_integrity);
+                """,
+                [market, timeframe_filter],
+            )
+            con.execute("INSERT INTO md.md_kline_integrity_day SELECT * FROM _stg_kline_integrity;")
+        con.execute("DROP TABLE _stg_kline_integrity;")
+
+        return {
+            "ok": True,
+            "market": market,
+            "timeframe_filter": timeframe_filter,
+            "mode": "incremental" if changed_paths else "date_range",
+            "rows_inserted": int(row_count),
+        }
+    finally:
+        if owns_connection and con is not None:
+            con.close()
 
 
 def _compute_base_liquidity_from_paths(

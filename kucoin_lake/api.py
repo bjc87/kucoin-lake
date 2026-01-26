@@ -36,6 +36,34 @@ def build_metadata(
     )
 
 
+def build_kline_integrity(
+    nas_root: str | Path,
+    *,
+    market: str = "futures",
+    meta_db_path: Optional[str | Path] = None,
+    timeframe_filter: str = "1m",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    changed_files: Optional[Sequence[Any]] = None,
+    recompute: bool = False,
+    incremental_chunk_size: int = 5000,
+) -> dict:
+    """
+    Notebook-friendly wrapper for kucoin_lake.metadata.build_or_update_kline_integrity_day.
+    """
+    return metadata_module.build_or_update_kline_integrity_day(
+        nas_root,
+        market=market,
+        meta_db_path=meta_db_path,
+        timeframe_filter=timeframe_filter,
+        start_date=start_date,
+        end_date=end_date,
+        changed_files=changed_files,
+        recompute=recompute,
+        incremental_chunk_size=incremental_chunk_size,
+    )
+
+
 def resample_1m_to_1d(
     nas_root: str | Path,
     local_staging_dir: Optional[str | Path] = None,

@@ -32,6 +32,20 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     build_parser.add_argument("--completeness-threshold", type=float, default=0.98)
     build_parser.add_argument("--incremental-chunk-size", type=int, default=5000)
 
+    integrity_parser = subparsers.add_parser(
+        "build-kline-integrity",
+        help="Build or update daily kline integrity checks.",
+    )
+    integrity_parser.add_argument("--nas-root", required=True)
+    integrity_parser.add_argument("--meta-db-path", required=True)
+    integrity_parser.add_argument("--market", default="futures")
+    integrity_parser.add_argument("--timeframe", default="1m")
+    integrity_parser.add_argument("--start-date")
+    integrity_parser.add_argument("--end-date")
+    integrity_parser.add_argument("--changed-files", nargs="+")
+    integrity_parser.add_argument("--recompute", action="store_true")
+    integrity_parser.add_argument("--incremental-chunk-size", type=int, default=5000)
+
     resample_parser = subparsers.add_parser(
         "resample-1m-to-1d",
         help="Resample 1m bars to 1d bars.",
@@ -166,6 +180,20 @@ def _handle_build_metadata(args: argparse.Namespace) -> dict:
     )
 
 
+def _handle_build_kline_integrity(args: argparse.Namespace) -> dict:
+    return api.build_kline_integrity(
+        args.nas_root,
+        market=args.market,
+        meta_db_path=args.meta_db_path,
+        timeframe_filter=args.timeframe,
+        start_date=args.start_date,
+        end_date=args.end_date,
+        changed_files=cast_sequence(args.changed_files),
+        recompute=args.recompute,
+        incremental_chunk_size=args.incremental_chunk_size,
+    )
+
+
 def _handle_resample(args: argparse.Namespace) -> dict:
     return api.resample_1m_to_1d(
         args.nas_root,
@@ -234,6 +262,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.command == "build-metadata":
         result = _handle_build_metadata(args)
+    elif args.command == "build-kline-integrity":
+        result = _handle_build_kline_integrity(args)
     elif args.command == "resample-1m-to-1d":
         result = _handle_resample(args)
     elif args.command == "ingest-local-downloads-to-lake":

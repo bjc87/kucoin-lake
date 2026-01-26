@@ -644,6 +644,9 @@ def build_or_update_metadata(
 ) -> dict:
     """
     Future-proofed for /spot by introducing 'market' everywhere, but only processes the chosen market.
+
+    Liquidity + rollups are derived from klines; if no relevant klines changes are detected for the
+    requested timeframe (and this is not the first run), those recomputations are skipped.
     """
     nas_root = Path(nas_root)
     if meta_db_path is None:
@@ -665,6 +668,8 @@ def build_or_update_metadata(
     try:
         first = is_first_run_coverage_for_timeframe(con, market=market, timeframe=timeframe_filter)
         changed = get_new_or_changed_files(con, files)
+        changed_klines_paths = _paths_for_changed_klines(changed, timeframe_filter=timeframe_filter)
+        has_relevant_klines_changes = bool(changed_klines_paths)
 
         upsert_manifest(con, files)
 
@@ -706,7 +711,7 @@ def build_or_update_metadata(
             incremental_chunk_size=incremental_chunk_size,
         )
 
-        if not liquidity_only:
+        if not liquidity_only and (first or has_relevant_klines_changes):
             recompute_rollups(con, market=market, timeframe_filter=timeframe_filter)
 
     finally:
@@ -977,6 +982,8 @@ def build_or_update_liquidity_daily(
                    [min_changed_date, max_changed_date + (lookback_days - 1)].
 
     You should pass changed_files from your existing build_or_update_metadata() pipeline to make it truly incremental.
+    If changed_files is None, a full recompute is performed (useful for explicit recompute/force flows).
+    If changed_files is an empty list, no liquidity recompute is performed.
     """
     nas_root = Path(nas_root)
 
@@ -992,7 +999,7 @@ def build_or_update_liquidity_daily(
     # Is this the first run for liquidity?
     first_run = is_first_run_liquidity_for_timeframe(con, market=market, timeframe=timeframe_filter)
 
-    if first_run or not changed_files:
+    if first_run or changed_files is None:
         # BULK: compute base liquidity from ALL klines files for timeframe_filter
         glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter) #(nas_root / market / "klines" / f"timeframe={timeframe_filter}" / "symbol=*" / "date=*" / "data.parquet").as_posix()
 
@@ -1053,6 +1060,14 @@ def build_or_update_liquidity_daily(
             "timeframe_filter": timeframe_filter,
             "lookback_days": lookback_days,
             "top_n": top_n,
+        }
+
+    if not changed_files:
+        return {
+            "ok": True,
+            "market": market,
+            "mode": "incremental_no_changed_files",
+            "timeframe_filter": timeframe_filter,
         }
 
     # INCREMENTAL: only changed klines paths

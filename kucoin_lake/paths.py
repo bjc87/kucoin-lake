@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Iterable
 
-from kucoin_lake.constants import DATASETS, DataType, FUTURES_DATASETS_WITH_TIMEFRAME
+from kucoin_lake.constants import DATASETS, DataType, DEFAULT_FUTURES_DATASETS, FUTURES_DATASETS_WITH_TIMEFRAME
 
 
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\.zip(?:\.CHECKSUM)?$")
@@ -78,3 +78,27 @@ def dataset_glob(nas_root: Path, market: str, dataset: str, timeframe: str = "*"
 
     # datasets without timeframe (e.g. funding)
     return (base / "symbol=*" / "date=*" / "data.parquet").as_posix()
+
+
+def parse_lake_partitions(path: str) -> dict[str, str]:
+    """
+    Extract partition values from a lake parquet path.
+
+    Returns keys like: market, dataset, timeframe, symbol, date, month.
+    """
+    parts = path.replace("\\", "/").split("/")
+    out: dict[str, str] = {}
+    for part in parts:
+        if part in ("futures", "spot"):
+            out["market"] = part
+        elif part in DEFAULT_FUTURES_DATASETS:
+            out["dataset"] = part
+        elif part.startswith("timeframe="):
+            out["timeframe"] = part.split("=", 1)[1]
+        elif part.startswith("symbol="):
+            out["symbol"] = part.split("=", 1)[1]
+        elif part.startswith("date="):
+            out["date"] = part.split("=", 1)[1]
+        elif part.startswith("month="):
+            out["month"] = part.split("=", 1)[1]
+    return out

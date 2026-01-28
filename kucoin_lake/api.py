@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
@@ -20,10 +21,17 @@ def build_metadata(
     liquidity_only: bool = False,
     completeness_threshold: float = 0.98,
     incremental_chunk_size: int = 5000,
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date | str] = None,
+    date_end: Optional[date | str] = None,
 ) -> dict:
     """
     Notebook-friendly wrapper for kucoin_lake.metadata.build_or_update_metadata.
     """
+    if isinstance(date_start, str):
+        date_start = date.fromisoformat(date_start)
+    if isinstance(date_end, str):
+        date_end = date.fromisoformat(date_end)
     return metadata_module.build_or_update_metadata(
         nas_root,
         market=market,
@@ -33,6 +41,9 @@ def build_metadata(
         liquidity_only=liquidity_only,
         completeness_threshold=completeness_threshold,
         incremental_chunk_size=incremental_chunk_size,
+        symbols=symbols,
+        date_start=date_start,
+        date_end=date_end,
     )
 
 

@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+import calendar
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Sequence
 
 import duckdb
 
-from kucoin_lake.paths import dataset_glob
+from kucoin_lake.paths import dataset_glob, iter_dates, month_starts, parse_lake_partitions
 
 
 def utc_now_iso() -> str:
@@ -31,6 +32,9 @@ def iter_data_parquets(
     datasets: Iterable[str],
     timeframe_filter: Optional[str] = None,
     datasets_with_timeframe: Optional[set[str]] = None,
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date] = None,
+    date_end: Optional[date] = None,
 ) -> Iterator[FileInfo]:
     """
     Iterate Parquet data files under the NAS lake and return FileInfo objects.
@@ -53,6 +57,11 @@ def iter_data_parquets(
     datasets_with_timeframe:
         Provide your existing FUTURES_DATASETS_WITH_TIMEFRAME as a set here, or leave None
         to use a conservative default for your current futures setup.
+    symbols:
+        Optional allowlist of symbols to scan (matched to symbol= partitions).
+    date_start / date_end:
+        Optional UTC date window to constrain partition scans. For 1m datasets this
+        filters date=YYYY-MM-DD; for derived timeframes this filters month=YYYY-MM.
 
     Yields
     ------
@@ -68,6 +77,22 @@ def iter_data_parquets(
     # Normalize for safety
     datasets_list: Sequence[str] = list(datasets)
 
+    if date_start and date_end and date_start > date_end:
+        raise ValueError("date_start must be <= date_end")
+
+    symbol_list = list(symbols) if symbols else None
+    symbol_allow = set(symbol_list) if symbol_list else None
+
+    def _month_overlaps_window(month_str: str) -> bool:
+        month_start = date.fromisoformat(f"{month_str}-01")
+        last_day = calendar.monthrange(month_start.year, month_start.month)[1]
+        month_end = date(month_start.year, month_start.month, last_day)
+        if date_start and month_end < date_start:
+            return False
+        if date_end and month_start > date_end:
+            return False
+        return True
+
     for ds in datasets_list:
 
         # Datasets without timeframe partitions (e.g. funding)
@@ -76,36 +101,93 @@ def iter_data_parquets(
             if timeframe_filter != "1m":
                 continue
             tf = "*"
+            partition_key = "date"
         else:
             # Timeframed datasets: scope to the requested timeframe
             tf = timeframe_filter if timeframe_filter else "*"
+            if tf == "*" or tf is None:
+                partition_key = "mixed"
+            else:
+                partition_key = "date" if tf == "1m" else "month"
 
-        glob_pat = dataset_glob(nas_root, market, ds, timeframe=tf)
+        base = nas_root / market / ds
+        if ds in datasets_with_timeframe:
+            base = base / f"timeframe={tf}"
+
+        symbol_dirs = [base / "symbol=*"]
+        if symbol_list:
+            symbol_dirs = [base / f"symbol={sym}" for sym in symbol_list]
+
+        if partition_key == "date":
+            if date_start and date_end:
+                partitions = [f"date={d.isoformat()}" for d in iter_dates(date_start, date_end)]
+            else:
+                partitions = ["date=*"]
+        elif partition_key == "month":
+            if date_start and date_end:
+                partitions = [f"month={d.strftime('%Y-%m')}" for d in month_starts(date_start, date_end)]
+            else:
+                partitions = ["month=*"]
+        else:
+            partitions = ["**"]
+
+        glob_pats = []
+        for sym_dir in symbol_dirs:
+            for part in partitions:
+                glob_pats.append((sym_dir / part / "data.parquet").as_posix())
+
+        if not glob_pats:
+            glob_pat = dataset_glob(nas_root, market, ds, timeframe=tf)
+            glob_pats = [glob_pat]
 
         # Use pathlib globbing (fast enough, avoids DuckDB).
         # NOTE: this will expand wildcard patterns; it's a filesystem walk.
-        for p in nas_root.glob(Path(glob_pat).relative_to(nas_root).as_posix()):
-            if not p.is_file():
-                continue
-            if p.name != "data.parquet":
-                continue
+        seen: set[str] = set()
+        for glob_pat in glob_pats:
+            rel_glob = Path(glob_pat).relative_to(nas_root).as_posix()
+            for p in nas_root.glob(rel_glob):
+                if not p.is_file():
+                    continue
+                if p.name != "data.parquet":
+                    continue
 
-            try:
-                st = p.stat()
-            except FileNotFoundError:
-                # File disappeared between glob and stat; ignore.
-                continue
+                file_rel = p.relative_to(nas_root).as_posix()
+                if file_rel in seen:
+                    continue
+                seen.add(file_rel)
 
-            file_rel = p.relative_to(nas_root).as_posix()
+                if symbol_allow or date_start or date_end:
+                    parts = parse_lake_partitions(file_rel)
+                    if symbol_allow and parts.get("symbol") not in symbol_allow:
+                        continue
+                    if date_start or date_end:
+                        if "date" in parts:
+                            try:
+                                file_date = date.fromisoformat(parts["date"])
+                            except ValueError:
+                                continue
+                            if (date_start and file_date < date_start) or (date_end and file_date > date_end):
+                                continue
+                        elif "month" in parts:
+                            if not _month_overlaps_window(parts["month"]):
+                                continue
+                        else:
+                            continue
 
-            yield FileInfo(
-                file_rel=file_rel,
-                market=market,
-                dataset=ds,
-                file_path=p.as_posix(),
-                file_size_bytes=int(st.st_size),
-                mtime_ns=int(st.st_mtime_ns),
-            )
+                try:
+                    st = p.stat()
+                except FileNotFoundError:
+                    # File disappeared between glob and stat; ignore.
+                    continue
+
+                yield FileInfo(
+                    file_rel=file_rel,
+                    market=market,
+                    dataset=ds,
+                    file_path=p.as_posix(),
+                    file_size_bytes=int(st.st_size),
+                    mtime_ns=int(st.st_mtime_ns),
+                )
 
 
 def upsert_manifest(con: duckdb.DuckDBPyConnection, files: Sequence[FileInfo]) -> None:

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import glob
 import os
-import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
@@ -10,31 +9,19 @@ from typing import Any, Optional, Sequence, Union
 import duckdb
 
 from kucoin_lake.ingest import LOCAL_STAGE_ROOT, atomic_copy_to_parquet
-
-# -----------------------------
-# Partition parsing helpers
-# -----------------------------
-_RE_SYMBOL = re.compile(r"/symbol=([^/]+)(?:/|$)")
-_RE_DATE = re.compile(r"/date=(\d{4}-\d{2}-\d{2})(?:/|$)")
-_RE_TIMEFRAME = re.compile(r"/timeframe=([^/]+)(?:/|$)")
-_RE_DATASET = re.compile(r"/(klines|mark|index|funding)(?:/|$)")
-
+from kucoin_lake.paths import parse_lake_partitions
 
 def _month_str(d: str) -> str:
     return d[:7]  # "YYYY-MM-DD" -> "YYYY-MM"
 
 
 def _parse_symbol_date_from_path(p: str) -> tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-    p2 = p.replace("\\", "/")
-    m_sym = _RE_SYMBOL.search(p2)
-    m_date = _RE_DATE.search(p2)
-    m_tf = _RE_TIMEFRAME.search(p2)
-    m_ds = _RE_DATASET.search(p2)
+    parts = parse_lake_partitions(p)
     return (
-        m_sym.group(1) if m_sym else None,
-        m_date.group(1) if m_date else None,
-        m_tf.group(1) if m_tf else None,
-        m_ds.group(1) if m_ds else None,
+        parts.get("symbol"),
+        parts.get("date"),
+        parts.get("timeframe"),
+        parts.get("dataset"),
     )
 
 

@@ -81,6 +81,7 @@ dist/
 # ----------------------------------------
 !tests/fixtures/**
 !tests/fixtures/**/data.parquet
+tests/fixtures/**/.DS_Store
 
 # ----------------------------------------
 # Logs / outputs

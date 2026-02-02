@@ -39,6 +39,7 @@ dist/
 *.duckdb-shm
 *.sqlite
 *.db
+*.DS_Store
 
 # ----------------------------------------
 # Data files (NEVER commit real data)

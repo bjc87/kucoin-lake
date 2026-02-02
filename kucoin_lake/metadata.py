@@ -659,6 +659,10 @@ def build_or_update_metadata(
             mode = "liquidity_only"
             changed_count = 0
 
+        sample_klines_files = [
+            f.file_path for f in files if f.dataset == "klines" and f"/timeframe={timeframe_filter}/" in f.file_path
+        ]
+
         liq_summary = build_or_update_liquidity_daily(
             con,
             nas_root=nas_root,
@@ -669,6 +673,7 @@ def build_or_update_metadata(
             changed_files=changed,  # pass the same changed files list
             incremental_chunk_size=incremental_chunk_size,
             scoped=scan_scope.is_scoped,
+            sample_files=sample_klines_files,
         )
 
         should_recompute_rollups = (first and not scan_scope.is_scoped) or has_relevant_klines_changes
@@ -1228,6 +1233,7 @@ def build_or_update_liquidity_daily(
     changed_files: Optional[Sequence[FileInfo]] = None,
     incremental_chunk_size: int = 5000,
     scoped: bool = False,
+    sample_files: Optional[Sequence[str]] = None,
 ) -> dict:
     """
     Build/update md.md_liquidity_daily derived entirely from klines.
@@ -1244,13 +1250,18 @@ def build_or_update_liquidity_daily(
     """
     nas_root = Path(nas_root)
 
-    # Detect columns using one sample file (pick any klines file)
-    sample_glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)
-    sample = con.execute(f"SELECT filename FROM read_parquet('{sample_glob}', filename=1, hive_partitioning=1) LIMIT 1;").fetchone()
-    if not sample:
-        return {"ok": False, "reason": "No klines parquet files found for sampling", "market": market}
-
-    sample_file = sample[0]
+    # Detect columns using one sample file (prefer scoped files if provided)
+    sample_file = sample_files[0] if sample_files else None
+    if sample_file is None:
+        if scoped:
+            return {"ok": True, "reason": "No scoped klines files available for sampling", "market": market}
+        sample_glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)
+        sample = con.execute(
+            f"SELECT filename FROM read_parquet('{sample_glob}', filename=1, hive_partitioning=1) LIMIT 1;"
+        ).fetchone()
+        if not sample:
+            return {"ok": False, "reason": "No klines parquet files found for sampling", "market": market}
+        sample_file = sample[0]
     time_col, close_col, vol_col = _detect_kline_cols(con, sample_file)
     day_key_expr = _day_key_expr_from_parquet(con, sample_file)
 

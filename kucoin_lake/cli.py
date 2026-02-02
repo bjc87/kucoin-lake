@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 from typing import Iterable, Sequence
 
 from kucoin_lake import api
@@ -31,6 +32,18 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     build_parser.add_argument("--liquidity-only", action="store_true")
     build_parser.add_argument("--completeness-threshold", type=float, default=0.98)
     build_parser.add_argument("--incremental-chunk-size", type=int, default=5000)
+    build_parser.add_argument(
+        "--symbols",
+        help="Comma-separated symbols to scan (e.g. BTCUSDTM,ETHUSDTM).",
+    )
+    build_parser.add_argument(
+        "--symbol",
+        dest="symbol",
+        action="append",
+        help="Repeatable symbol filter (may be passed multiple times).",
+    )
+    build_parser.add_argument("--date-start", help="YYYY-MM-DD (UTC)")
+    build_parser.add_argument("--date-end", help="YYYY-MM-DD (UTC)")
 
     integrity_parser = subparsers.add_parser(
         "build-kline-integrity",
@@ -168,6 +181,14 @@ def _print_result(result: dict | None) -> None:
 
 
 def _handle_build_metadata(args: argparse.Namespace) -> dict:
+    symbols: list[str] = []
+    if args.symbols:
+        symbols.extend([s.strip() for s in args.symbols.split(",") if s.strip()])
+    if args.symbol:
+        symbols.extend([s.strip() for s in args.symbol if s.strip()])
+    symbol_filter = sorted(set(symbols)) if symbols else None
+    date_start = date.fromisoformat(args.date_start) if args.date_start else None
+    date_end = date.fromisoformat(args.date_end) if args.date_end else None
     return api.build_metadata(
         args.nas_root,
         market=args.market,
@@ -177,6 +198,9 @@ def _handle_build_metadata(args: argparse.Namespace) -> dict:
         liquidity_only=args.liquidity_only,
         completeness_threshold=args.completeness_threshold,
         incremental_chunk_size=args.incremental_chunk_size,
+        symbols=symbol_filter,
+        date_start=date_start,
+        date_end=date_end,
     )
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import glob as globlib
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
@@ -21,6 +21,17 @@ from kucoin_lake.util import expected_rows_for_day
 
 DEFAULT_META_SUBDIR = "_meta"
 DEFAULT_META_DBNAME = "metadata.duckdb"
+
+
+@dataclass(frozen=True)
+class ScanScope:
+    symbols: Optional[Sequence[str]] = None
+    date_start: Optional[date] = None
+    date_end: Optional[date] = None
+
+    @property
+    def is_scoped(self) -> bool:
+        return bool(self.symbols or self.date_start or self.date_end)
 
 
 def default_local_meta_db_path(market: str) -> Path:
@@ -375,17 +386,84 @@ def incremental_refresh_coverage_for_files(
         con.execute("DROP TABLE _stg_cov;")
 
 
-def recompute_rollups(con: duckdb.DuckDBPyConnection, market: str, *, timeframe_filter: str) -> None:
+def _sql_list(values: Sequence[str]) -> str:
+    return "(" + ",".join("'" + v.replace("'", "''") + "'" for v in values) + ")"
+
+
+def _resolve_rollup_symbols(
+    con: duckdb.DuckDBPyConnection,
+    market: str,
+    timeframe_filter: str,
+    *,
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date] = None,
+    date_end: Optional[date] = None,
+) -> Optional[list[str]]:
+    if symbols is not None:
+        return sorted(set(symbols))
+    if date_start is None and date_end is None:
+        return None
+
+    date_filter = []
+    if date_start is not None:
+        date_filter.append(f"date >= CAST('{date_start.isoformat()}' AS DATE)")
+    if date_end is not None:
+        date_filter.append(f"date <= CAST('{date_end.isoformat()}' AS DATE)")
+    date_clause = " AND " + " AND ".join(date_filter) if date_filter else ""
+
+    rows = con.execute(
+        f"""
+        SELECT DISTINCT symbol
+        FROM md.md_partition_coverage
+        WHERE market = '{market}'
+          AND (
+                timeframe = '{timeframe_filter}'
+             OR ('{timeframe_filter}' = '1m' AND dataset='funding' AND timeframe = '')
+          ){date_clause}
+        """
+    ).fetchall()
+    resolved = sorted({r[0] for r in rows if r and r[0] is not None})
+    return resolved
+
+
+def recompute_rollups(
+    con: duckdb.DuckDBPyConnection,
+    market: str,
+    *,
+    timeframe_filter: str,
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date] = None,
+    date_end: Optional[date] = None,
+) -> None:
     now = utc_now_iso()
 
-    # Delete only this timeframe's rollups (non-destructive)
-    con.execute(
-        "DELETE FROM md.md_symbol_dataset_stats WHERE market = ? AND timeframe = ?;",
-        [market, timeframe_filter],
+    symbol_list = _resolve_rollup_symbols(
+        con,
+        market,
+        timeframe_filter,
+        symbols=symbols,
+        date_start=date_start,
+        date_end=date_end,
     )
+    symbol_clause = ""
+    if symbol_list is not None:
+        if not symbol_list:
+            return
+        symbol_clause = f" AND symbol IN {_sql_list(symbol_list)}"
 
     # For timeframe_filter == '1m', include funding rows stored with timeframe=''
     # by normalizing them into tf_norm='1m' for rollup purposes.
+    if symbol_list is None:
+        con.execute(
+            "DELETE FROM md.md_symbol_dataset_stats WHERE market = ? AND timeframe = ?;",
+            [market, timeframe_filter],
+        )
+    else:
+        con.execute(
+            f"DELETE FROM md.md_symbol_dataset_stats WHERE market = ? AND timeframe = ?{symbol_clause};",
+            [market, timeframe_filter],
+        )
+
     con.execute(
         f"""
         INSERT INTO md.md_symbol_dataset_stats
@@ -408,7 +486,7 @@ def recompute_rollups(con: duckdb.DuckDBPyConnection, market: str, *, timeframe_
               AND (
                     timeframe = '{timeframe_filter}'
                  OR ('{timeframe_filter}' = '1m' AND dataset='funding' AND timeframe = '')
-              )
+              ){symbol_clause}
         )
         SELECT
             market,
@@ -431,10 +509,25 @@ def recompute_rollups(con: duckdb.DuckDBPyConnection, market: str, *, timeframe_
     )
 
     # Alignment: rebuild only this timeframe (non-destructive)
-    con.execute(
-        "DELETE FROM md.md_alignment_summary WHERE market = ? AND timeframe = ?;",
-        [market, timeframe_filter],
-    )
+    date_filter = ""
+    if date_start is not None:
+        date_filter += f" AND date >= CAST('{date_start.isoformat()}' AS DATE)"
+    if date_end is not None:
+        date_filter += f" AND date <= CAST('{date_end.isoformat()}' AS DATE)"
+
+    if symbol_list is None and not date_filter:
+        con.execute(
+            "DELETE FROM md.md_alignment_summary WHERE market = ? AND timeframe = ?;",
+            [market, timeframe_filter],
+        )
+    else:
+        con.execute(
+            f"""
+            DELETE FROM md.md_alignment_summary
+            WHERE market = ? AND timeframe = ?{symbol_clause}{date_filter};
+            """,
+            [market, timeframe_filter],
+        )
 
     con.execute(
         f"""
@@ -461,7 +554,7 @@ def recompute_rollups(con: duckdb.DuckDBPyConnection, market: str, *, timeframe_
               AND (
                     timeframe = '{timeframe_filter}'
                  OR ('{timeframe_filter}' = '1m' AND dataset='funding' AND timeframe = '')
-              )
+              ){symbol_clause}{date_filter}
             GROUP BY market, tf_norm, symbol, date
         )
         SELECT
@@ -496,17 +589,26 @@ def build_or_update_metadata(
     liquidity_only: bool = False,
     completeness_threshold: float = 0.98,
     incremental_chunk_size: int = 5000,
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date] = None,
+    date_end: Optional[date] = None,
 ) -> dict:
     """
     Future-proofed for /spot by introducing 'market' everywhere, but only processes the chosen market.
 
     Liquidity + rollups are derived from klines; if no relevant klines changes are detected for the
     requested timeframe (and this is not the first run), those recomputations are skipped.
+
+    Optional scan scope:
+      - symbols: allowlist for symbol= partitions
+      - date_start/date_end: UTC date window, applied to date or month partitions
     """
     nas_root = Path(nas_root)
     if meta_db_path is None:
         meta_db_path = default_local_meta_db_path(market)
     meta_db_path = Path(meta_db_path)
+
+    scan_scope = ScanScope(symbols=symbols, date_start=date_start, date_end=date_end)
 
     files = list(
         iter_data_parquets(
@@ -515,6 +617,9 @@ def build_or_update_metadata(
             datasets=datasets,
             timeframe_filter=timeframe_filter,
             datasets_with_timeframe=set(FUTURES_DATASETS_WITH_TIMEFRAME),
+            symbols=scan_scope.symbols,
+            date_start=scan_scope.date_start,
+            date_end=scan_scope.date_end,
         )
     )
 
@@ -528,7 +633,7 @@ def build_or_update_metadata(
         upsert_manifest(con, files)
 
         if not liquidity_only:
-            if first:
+            if first and not scan_scope.is_scoped:
                 bulk_refresh_coverage_first_run(
                     con,
                     nas_root=nas_root,
@@ -548,11 +653,15 @@ def build_or_update_metadata(
                     timeframe_filter=timeframe_filter,
                     chunk_size=incremental_chunk_size,
                 )
-                mode = "incremental"
+                mode = "scoped_first_run" if first else "incremental"
                 changed_count = len(changed)
         else:
             mode = "liquidity_only"
             changed_count = 0
+
+        sample_klines_files = [
+            f.file_path for f in files if f.dataset == "klines" and f"/timeframe={timeframe_filter}/" in f.file_path
+        ]
 
         liq_summary = build_or_update_liquidity_daily(
             con,
@@ -563,10 +672,21 @@ def build_or_update_metadata(
             top_n=100,
             changed_files=changed,  # pass the same changed files list
             incremental_chunk_size=incremental_chunk_size,
+            scoped=scan_scope.is_scoped,
+            sample_files=sample_klines_files,
         )
 
-        if not liquidity_only and (first or has_relevant_klines_changes):
-            recompute_rollups(con, market=market, timeframe_filter=timeframe_filter)
+        should_recompute_rollups = (first and not scan_scope.is_scoped) or has_relevant_klines_changes
+
+        if not liquidity_only and should_recompute_rollups:
+            recompute_rollups(
+                con,
+                market=market,
+                timeframe_filter=timeframe_filter,
+                symbols=scan_scope.symbols,
+                date_start=scan_scope.date_start,
+                date_end=scan_scope.date_end,
+            )
             if timeframe_filter == "1m":
                 integrity_summary = build_or_update_kline_integrity_day(
                     nas_root,
@@ -1112,6 +1232,8 @@ def build_or_update_liquidity_daily(
     top_n: int = 100,
     changed_files: Optional[Sequence[FileInfo]] = None,
     incremental_chunk_size: int = 5000,
+    scoped: bool = False,
+    sample_files: Optional[Sequence[str]] = None,
 ) -> dict:
     """
     Build/update md.md_liquidity_daily derived entirely from klines.
@@ -1124,23 +1246,29 @@ def build_or_update_liquidity_daily(
     You should pass changed_files from your existing build_or_update_metadata() pipeline to make it truly incremental.
     If changed_files is None, a full recompute is performed (useful for explicit recompute/force flows).
     If changed_files is an empty list, no liquidity recompute is performed.
+    When scoped=True, avoid full rebuilds triggered by first-run detection.
     """
     nas_root = Path(nas_root)
 
-    # Detect columns using one sample file (pick any klines file)
-    sample_glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)
-    sample = con.execute(f"SELECT filename FROM read_parquet('{sample_glob}', filename=1, hive_partitioning=1) LIMIT 1;").fetchone()
-    if not sample:
-        return {"ok": False, "reason": "No klines parquet files found for sampling", "market": market}
-
-    sample_file = sample[0]
+    # Detect columns using one sample file (prefer scoped files if provided)
+    sample_file = sample_files[0] if sample_files else None
+    if sample_file is None:
+        if scoped:
+            return {"ok": True, "reason": "No scoped klines files available for sampling", "market": market}
+        sample_glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)
+        sample = con.execute(
+            f"SELECT filename FROM read_parquet('{sample_glob}', filename=1, hive_partitioning=1) LIMIT 1;"
+        ).fetchone()
+        if not sample:
+            return {"ok": False, "reason": "No klines parquet files found for sampling", "market": market}
+        sample_file = sample[0]
     time_col, close_col, vol_col = _detect_kline_cols(con, sample_file)
     day_key_expr = _day_key_expr_from_parquet(con, sample_file)
 
     # Is this the first run for liquidity?
     first_run = is_first_run_liquidity_for_timeframe(con, market=market, timeframe=timeframe_filter)
 
-    if first_run or changed_files is None:
+    if (first_run or changed_files is None) and not scoped:
         # BULK: compute base liquidity from ALL klines files for timeframe_filter
         glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)  # (nas_root / market / "klines" / f"timeframe={timeframe_filter}" / "symbol=*" / "date=*" / "data.parquet").as_posix()
 

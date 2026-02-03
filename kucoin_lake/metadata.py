@@ -390,6 +390,56 @@ def _sql_list(values: Sequence[str]) -> str:
     return "(" + ",".join("'" + v.replace("'", "''") + "'" for v in values) + ")"
 
 
+def _scope_filter_clause(
+    *,
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date] = None,
+    date_end: Optional[date] = None,
+    prefix: str = "",
+) -> str:
+    prefix = f"{prefix}." if prefix else ""
+    clauses: list[str] = []
+    if symbols:
+        symbols_list = sorted(set(symbols))
+        clauses.append(f"{prefix}symbol IN {_sql_list(symbols_list)}")
+    if date_start is not None:
+        clauses.append(f"{prefix}date >= CAST('{date_start.isoformat()}' AS DATE)")
+    if date_end is not None:
+        clauses.append(f"{prefix}date <= CAST('{date_end.isoformat()}' AS DATE)")
+    return " AND " + " AND ".join(clauses) if clauses else ""
+
+
+def _missing_keys_from_coverage(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    market: str,
+    timeframe_filter: str,
+    target_table: str,
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date] = None,
+    date_end: Optional[date] = None,
+) -> list[tuple[str, date]]:
+    scope_clause = _scope_filter_clause(symbols=symbols, date_start=date_start, date_end=date_end, prefix="c")
+    rows = con.execute(
+        f"""
+        SELECT c.symbol, c.date
+        FROM md.md_partition_coverage c
+        LEFT JOIN {target_table} t
+          ON t.market = c.market
+         AND t.timeframe = c.timeframe
+         AND t.symbol = c.symbol
+         AND t.date = c.date
+        WHERE c.market = ?
+          AND c.dataset = 'klines'
+          AND c.timeframe = ?{scope_clause}
+          AND t.symbol IS NULL
+        ORDER BY c.symbol, c.date;
+        """,
+        [market, timeframe_filter],
+    ).fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
 def _resolve_rollup_symbols(
     con: duckdb.DuckDBPyConnection,
     market: str,
@@ -659,6 +709,29 @@ def build_or_update_metadata(
             mode = "liquidity_only"
             changed_count = 0
 
+        missing_liq_keys: list[tuple[str, date]] = []
+        missing_int_keys: list[tuple[str, date]] = []
+        if timeframe_filter == "1m":
+            missing_liq_keys = _missing_keys_from_coverage(
+                con,
+                market=market,
+                timeframe_filter=timeframe_filter,
+                target_table="md.md_liquidity_daily",
+                symbols=scan_scope.symbols,
+                date_start=scan_scope.date_start,
+                date_end=scan_scope.date_end,
+            )
+            if not liquidity_only:
+                missing_int_keys = _missing_keys_from_coverage(
+                    con,
+                    market=market,
+                    timeframe_filter=timeframe_filter,
+                    target_table="md.md_kline_integrity_day",
+                    symbols=scan_scope.symbols,
+                    date_start=scan_scope.date_start,
+                    date_end=scan_scope.date_end,
+                )
+
         sample_klines_files = [
             f.file_path for f in files if f.dataset == "klines" and f"/timeframe={timeframe_filter}/" in f.file_path
         ]
@@ -671,6 +744,7 @@ def build_or_update_metadata(
             lookback_days=30,
             top_n=100,
             changed_files=changed,  # pass the same changed files list
+            missing_keys=missing_liq_keys,
             incremental_chunk_size=incremental_chunk_size,
             scoped=scan_scope.is_scoped,
             sample_files=sample_klines_files,
@@ -687,30 +761,45 @@ def build_or_update_metadata(
                 date_start=scan_scope.date_start,
                 date_end=scan_scope.date_end,
             )
-            if timeframe_filter == "1m":
-                integrity_summary = build_or_update_kline_integrity_day(
-                    nas_root,
-                    market=market,
-                    meta_db_path=meta_db_path,
-                    timeframe_filter=timeframe_filter,
-                    changed_files=changed,
-                    recompute=False,
-                    incremental_chunk_size=incremental_chunk_size,
-                    con=con,
-                )
-            else:
-                integrity_summary = {
-                    "ok": True,
-                    "market": market,
-                    "timeframe_filter": timeframe_filter,
-                    "mode": "skipped_non_1m_timeframe",
-                }
-        else:
+
+        should_run_integrity = (
+            (timeframe_filter == "1m")
+            and not liquidity_only
+            and (has_relevant_klines_changes or missing_int_keys or (first and not scan_scope.is_scoped))
+        )
+
+        if should_run_integrity:
+            integrity_summary = build_or_update_kline_integrity_day(
+                nas_root,
+                market=market,
+                meta_db_path=meta_db_path,
+                timeframe_filter=timeframe_filter,
+                changed_files=changed,
+                missing_keys=missing_int_keys,
+                recompute=False,
+                incremental_chunk_size=incremental_chunk_size,
+                con=con,
+            )
+        elif liquidity_only:
             integrity_summary = {
                 "ok": True,
                 "market": market,
                 "timeframe_filter": timeframe_filter,
                 "mode": "skipped_liquidity_only",
+            }
+        elif timeframe_filter != "1m":
+            integrity_summary = {
+                "ok": True,
+                "market": market,
+                "timeframe_filter": timeframe_filter,
+                "mode": "skipped_non_1m_timeframe",
+            }
+        else:
+            integrity_summary = {
+                "ok": True,
+                "market": market,
+                "timeframe_filter": timeframe_filter,
+                "mode": "skipped_no_changes",
             }
 
     finally:
@@ -727,6 +816,130 @@ def build_or_update_metadata(
         "coverage_mode": mode,
         "when_utc": utc_now_iso(),
         "liquidity": liq_summary,
+        "kline_integrity": integrity_summary,
+    }
+
+
+def backfill_derived_from_coverage(
+    nas_root: str | Path,
+    *,
+    market: str = "futures",
+    timeframe_filter: str = "1m",
+    meta_db_path: Optional[str | Path] = None,
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date] = None,
+    date_end: Optional[date] = None,
+    what: Sequence[str] = ("liquidity", "integrity"),
+    incremental_chunk_size: int = 5000,
+) -> dict:
+    """
+    Backfill derived tables from coverage without requiring changed_files or a filesystem scan.
+    """
+    nas_root = Path(nas_root)
+    if meta_db_path is None:
+        meta_db_path = default_local_meta_db_path(market)
+    meta_db_path = Path(meta_db_path)
+
+    scan_scope = ScanScope(symbols=symbols, date_start=date_start, date_end=date_end)
+    what_set = {w.lower() for w in what}
+
+    con = connect_meta_db(meta_db_path)
+    try:
+        liquidity_summary: dict | None = None
+        integrity_summary: dict | None = None
+
+        if "liquidity" in what_set:
+            if timeframe_filter != "1m":
+                liquidity_summary = {
+                    "ok": True,
+                    "market": market,
+                    "timeframe_filter": timeframe_filter,
+                    "mode": "skipped_non_1m_timeframe",
+                }
+            else:
+                missing_liq_keys = _missing_keys_from_coverage(
+                    con,
+                    market=market,
+                    timeframe_filter=timeframe_filter,
+                    target_table="md.md_liquidity_daily",
+                    symbols=scan_scope.symbols,
+                    date_start=scan_scope.date_start,
+                    date_end=scan_scope.date_end,
+                )
+                if missing_liq_keys:
+                    liquidity_summary = build_or_update_liquidity_daily(
+                        con,
+                        nas_root=nas_root,
+                        market=market,
+                        timeframe_filter=timeframe_filter,
+                        lookback_days=30,
+                        top_n=100,
+                        changed_files=[],
+                        missing_keys=missing_liq_keys,
+                        incremental_chunk_size=incremental_chunk_size,
+                        scoped=scan_scope.is_scoped,
+                        sample_files=None,
+                    )
+                else:
+                    liquidity_summary = {
+                        "ok": True,
+                        "market": market,
+                        "timeframe_filter": timeframe_filter,
+                        "mode": "no_missing_keys",
+                    }
+
+        if "integrity" in what_set:
+            if timeframe_filter != "1m":
+                integrity_summary = {
+                    "ok": True,
+                    "market": market,
+                    "timeframe_filter": timeframe_filter,
+                    "mode": "skipped_non_1m_timeframe",
+                }
+            else:
+                missing_int_keys = _missing_keys_from_coverage(
+                    con,
+                    market=market,
+                    timeframe_filter=timeframe_filter,
+                    target_table="md.md_kline_integrity_day",
+                    symbols=scan_scope.symbols,
+                    date_start=scan_scope.date_start,
+                    date_end=scan_scope.date_end,
+                )
+                if missing_int_keys:
+                    integrity_summary = build_or_update_kline_integrity_day(
+                        nas_root,
+                        market=market,
+                        meta_db_path=meta_db_path,
+                        timeframe_filter=timeframe_filter,
+                        changed_files=[],
+                        missing_keys=missing_int_keys,
+                        recompute=False,
+                        incremental_chunk_size=incremental_chunk_size,
+                        con=con,
+                    )
+                else:
+                    integrity_summary = {
+                        "ok": True,
+                        "market": market,
+                        "timeframe_filter": timeframe_filter,
+                        "mode": "no_missing_keys",
+                    }
+    finally:
+        con.close()
+
+    return {
+        "ok": True,
+        "nas_root": nas_root.as_posix(),
+        "market": market,
+        "timeframe_filter": timeframe_filter,
+        "meta_db_path": meta_db_path.as_posix(),
+        "scope": {
+            "symbols": list(scan_scope.symbols) if scan_scope.symbols else None,
+            "date_start": scan_scope.date_start.isoformat() if scan_scope.date_start else None,
+            "date_end": scan_scope.date_end.isoformat() if scan_scope.date_end else None,
+        },
+        "liquidity": liquidity_summary,
         "kline_integrity": integrity_summary,
     }
 
@@ -834,6 +1047,31 @@ def _paths_for_changed_klines(
     return out
 
 
+def _klines_parquet_paths_for_day_keys(
+    nas_root: Path,
+    market: str,
+    *,
+    timeframe_filter: str,
+    keys: Sequence[tuple[str, date | str]],
+) -> list[str]:
+    if timeframe_filter != "1m":
+        raise ValueError("missing key path derivation only supports timeframe_filter='1m'")
+    paths: list[str] = []
+    for symbol, day in keys:
+        day_str = day.isoformat() if isinstance(day, date) else str(day)
+        path = (
+            Path(nas_root)
+            / market
+            / "klines"
+            / f"timeframe={timeframe_filter}"
+            / f"symbol={symbol}"
+            / f"date={day_str}"
+            / "data.parquet"
+        )
+        paths.append(path.as_posix())
+    return paths
+
+
 def _detect_kline_ohlc_cols(
     con: duckdb.DuckDBPyConnection,
     sample_file: str,
@@ -870,6 +1108,7 @@ def build_or_update_kline_integrity_day(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     changed_files: Optional[Sequence[FileInfo | str]] = None,
+    missing_keys: Optional[Sequence[tuple[str, date | str]]] = None,
     recompute: bool = False,
     incremental_chunk_size: int = 5000,
     con: duckdb.DuckDBPyConnection | None = None,
@@ -885,8 +1124,17 @@ def build_or_update_kline_integrity_day(
     changed_paths: list[str] = []
     if changed_files:
         changed_paths = _paths_for_changed_klines(changed_files, timeframe_filter=timeframe_filter)
+    missing_keys_list = list(missing_keys) if missing_keys else []
+    missing_paths: list[str] = []
+    if missing_keys_list:
+        missing_paths = _klines_parquet_paths_for_day_keys(
+            nas_root,
+            market,
+            timeframe_filter=timeframe_filter,
+            keys=missing_keys_list,
+        )
 
-    if not changed_paths and start_date is None and end_date is None and not recompute:
+    if not changed_paths and not missing_paths and start_date is None and end_date is None and not recompute:
         return {
             "ok": True,
             "market": market,
@@ -901,8 +1149,9 @@ def build_or_update_kline_integrity_day(
         owns_connection = True
 
     try:
-        if changed_paths:
-            sample_file = changed_paths[0]
+        effective_paths = sorted(set(changed_paths + missing_paths))
+        if effective_paths:
+            sample_file = effective_paths[0]
             source_rel = "read_parquet({arr}, hive_partitioning=1, filename=0)"
         else:
             glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)
@@ -923,9 +1172,9 @@ def build_or_update_kline_integrity_day(
 
         con.execute("CREATE TEMP TABLE _stg_kline_integrity AS SELECT * FROM md.md_kline_integrity_day WHERE 1=0;")
 
-        if changed_paths:
-            for i in range(0, len(changed_paths), incremental_chunk_size):
-                batch = changed_paths[i : i + incremental_chunk_size]
+        if effective_paths:
+            for i in range(0, len(effective_paths), incremental_chunk_size):
+                batch = effective_paths[i : i + incremental_chunk_size]
                 arr = "[" + ",".join("'" + p.replace("'", "''") + "'" for p in batch) + "]"
                 con.execute(
                     f"""
@@ -1042,7 +1291,9 @@ def build_or_update_kline_integrity_day(
             "ok": True,
             "market": market,
             "timeframe_filter": timeframe_filter,
-            "mode": "incremental" if changed_paths else "date_range",
+            "mode": "incremental" if changed_paths else ("missing_keys" if missing_paths else "date_range"),
+            "changed_klines_files": int(len(changed_paths)),
+            "missing_keys": int(len(missing_paths)),
             "rows_inserted": int(row_count),
         }
     finally:
@@ -1199,6 +1450,95 @@ def _recompute_rolling_and_rank_for_date_range(
     )
 
 
+def _recompute_rolling_and_rank_for_keys(
+    con: duckdb.DuckDBPyConnection,
+    market: str,
+    timeframe: str,
+    *,
+    keys: Sequence[tuple[str, date]],
+    lookback_days: int,
+    top_n: int,
+) -> None:
+    if not keys:
+        return
+
+    con.execute("CREATE TEMP TABLE _missing_liq_keys(symbol VARCHAR, date DATE);")
+    con.executemany("INSERT INTO _missing_liq_keys VALUES (?, ?);", [(symbol, day) for symbol, day in keys])
+
+    dr = con.execute("SELECT MIN(date)::VARCHAR, MAX(date)::VARCHAR FROM _missing_liq_keys;").fetchone()
+    if not dr or dr[0] is None or dr[1] is None:
+        con.execute("DROP TABLE _missing_liq_keys;")
+        return
+
+    con.execute(
+        f"""
+        WITH base AS (
+            SELECT
+                market,
+                timeframe,
+                symbol,
+                date,
+                dollar_volume
+            FROM md.md_liquidity_daily
+            WHERE market = '{market}'
+              AND timeframe = '{timeframe}'
+              AND date BETWEEN
+                    (CAST('{dr[0]}' AS DATE) - INTERVAL '{lookback_days - 1} days')
+                AND CAST('{dr[1]}' AS DATE)
+        ),
+        calc AS (
+            SELECT
+                market,
+                timeframe,
+                symbol,
+                date,
+                QUANTILE_CONT(dollar_volume, 0.5) OVER (
+                    PARTITION BY market, timeframe, symbol
+                    ORDER BY date
+                    ROWS BETWEEN {lookback_days - 1} PRECEDING AND CURRENT ROW
+                ) AS dv_30d_median
+            FROM base
+        ),
+        missing_dates AS (
+            SELECT DISTINCT date FROM _missing_liq_keys
+        ),
+        ranked AS (
+            SELECT
+                c.market,
+                c.timeframe,
+                c.symbol,
+                c.date,
+                c.dv_30d_median,
+                RANK() OVER (
+                    PARTITION BY c.market, c.timeframe, c.date
+                    ORDER BY c.dv_30d_median DESC NULLS LAST
+                ) AS liquidity_rank_30d
+            FROM calc c
+            WHERE c.date IN (SELECT date FROM missing_dates)
+        ),
+        to_update AS (
+            SELECT r.*
+            FROM ranked r
+            INNER JOIN _missing_liq_keys k
+                ON k.symbol = r.symbol AND k.date = r.date
+        )
+        UPDATE md.md_liquidity_daily t
+        SET
+            dv_30d_median = u.dv_30d_median,
+            liquidity_rank_30d = u.liquidity_rank_30d,
+            in_top_100 = (u.liquidity_rank_30d <= {top_n}),
+            computed_at_utc = {_utc_now_ts_expr()}
+        FROM to_update u
+        WHERE t.market = u.market
+          AND t.timeframe = u.timeframe
+          AND t.symbol = u.symbol
+          AND t.date = u.date;
+        """
+    )
+
+    con.execute("DROP TABLE _missing_liq_keys;")
+
+
 def is_first_run_coverage_for_timeframe(con: duckdb.DuckDBPyConnection, market: str, timeframe: str) -> bool:
     if timeframe == "1m":
         # 1m core + funding (timeframe='')
@@ -1231,6 +1571,7 @@ def build_or_update_liquidity_daily(
     lookback_days: int = 30,
     top_n: int = 100,
     changed_files: Optional[Sequence[FileInfo]] = None,
+    missing_keys: Optional[Sequence[tuple[str, date | str]]] = None,
     incremental_chunk_size: int = 5000,
     scoped: bool = False,
     sample_files: Optional[Sequence[str]] = None,
@@ -1244,31 +1585,40 @@ def build_or_update_liquidity_daily(
                    [min_changed_date, max_changed_date + (lookback_days - 1)].
 
     You should pass changed_files from your existing build_or_update_metadata() pipeline to make it truly incremental.
+    If missing_keys is provided, compute only those symbol-days even if changed_files is empty.
     If changed_files is None, a full recompute is performed (useful for explicit recompute/force flows).
-    If changed_files is an empty list, no liquidity recompute is performed.
+    If changed_files is an empty list and missing_keys is empty, no liquidity recompute is performed.
     When scoped=True, avoid full rebuilds triggered by first-run detection.
     """
     nas_root = Path(nas_root)
 
-    # Detect columns using one sample file (prefer scoped files if provided)
-    sample_file = sample_files[0] if sample_files else None
-    if sample_file is None:
-        if scoped:
-            return {"ok": True, "reason": "No scoped klines files available for sampling", "market": market}
-        sample_glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)
-        sample = con.execute(
-            f"SELECT filename FROM read_parquet('{sample_glob}', filename=1, hive_partitioning=1) LIMIT 1;"
-        ).fetchone()
-        if not sample:
-            return {"ok": False, "reason": "No klines parquet files found for sampling", "market": market}
-        sample_file = sample[0]
-    time_col, close_col, vol_col = _detect_kline_cols(con, sample_file)
-    day_key_expr = _day_key_expr_from_parquet(con, sample_file)
+    missing_keys_list = list(missing_keys) if missing_keys else []
+    missing_paths: list[str] = []
+    if missing_keys_list:
+        missing_paths = _klines_parquet_paths_for_day_keys(
+            nas_root,
+            market,
+            timeframe_filter=timeframe_filter,
+            keys=missing_keys_list,
+        )
 
     # Is this the first run for liquidity?
     first_run = is_first_run_liquidity_for_timeframe(con, market=market, timeframe=timeframe_filter)
 
     if (first_run or changed_files is None) and not scoped:
+        # Detect columns using one sample file (prefer scoped files if provided)
+        sample_file = sample_files[0] if sample_files else None
+        if sample_file is None:
+            sample_glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)
+            sample = con.execute(
+                f"SELECT filename FROM read_parquet('{sample_glob}', filename=1, hive_partitioning=1) LIMIT 1;"
+            ).fetchone()
+            if not sample:
+                return {"ok": False, "reason": "No klines parquet files found for sampling", "market": market}
+            sample_file = sample[0]
+        time_col, close_col, vol_col = _detect_kline_cols(con, sample_file)
+        day_key_expr = _day_key_expr_from_parquet(con, sample_file)
+
         # BULK: compute base liquidity from ALL klines files for timeframe_filter
         glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)  # (nas_root / market / "klines" / f"timeframe={timeframe_filter}" / "symbol=*" / "date=*" / "data.parquet").as_posix()
 
@@ -1331,7 +1681,7 @@ def build_or_update_liquidity_daily(
             "top_n": top_n,
         }
 
-    if not changed_files:
+    if changed_files is None and not missing_paths:
         return {
             "ok": True,
             "market": market,
@@ -1339,9 +1689,19 @@ def build_or_update_liquidity_daily(
             "timeframe_filter": timeframe_filter,
         }
 
-    # INCREMENTAL: only changed klines paths
-    changed_paths = _paths_for_changed_klines(changed_files, timeframe_filter=timeframe_filter)
-    if not changed_paths:
+    if changed_files is not None and not changed_files and not missing_paths:
+        return {
+            "ok": True,
+            "market": market,
+            "mode": "incremental_no_changed_files",
+            "timeframe_filter": timeframe_filter,
+        }
+
+    # INCREMENTAL: changed klines paths and/or missing keys
+    changed_paths: list[str] = []
+    if changed_files:
+        changed_paths = _paths_for_changed_klines(changed_files, timeframe_filter=timeframe_filter)
+    if not changed_paths and not missing_paths:
         return {
             "ok": True,
             "market": market,
@@ -1349,11 +1709,27 @@ def build_or_update_liquidity_daily(
             "timeframe_filter": timeframe_filter,
         }
 
-    # Compute base liquidity for only changed symbol-days
+    sample_file = sample_files[0] if sample_files else None
+    if sample_file is None:
+        if missing_paths:
+            sample_file = missing_paths[0]
+        elif changed_paths:
+            sample_file = changed_paths[0]
+        elif scoped:
+            return {"ok": True, "reason": "No scoped klines files available for sampling", "market": market}
+    if sample_file is None:
+        return {"ok": False, "reason": "No klines parquet files found for sampling", "market": market}
+
+    time_col, close_col, vol_col = _detect_kline_cols(con, sample_file)
+    day_key_expr = _day_key_expr_from_parquet(con, sample_file)
+
+    paths_for_base = sorted(set(changed_paths + missing_paths))
+
+    # Compute base liquidity for changed/missing symbol-days
     _compute_base_liquidity_from_paths(
         con,
         market,
-        changed_paths,
+        paths_for_base,
         timeframe_filter=timeframe_filter,
         time_col=time_col,
         day_key_expr=day_key_expr,
@@ -1362,49 +1738,77 @@ def build_or_update_liquidity_daily(
         chunk_size=incremental_chunk_size,
     )
 
-    # Determine affected date range.
-    # We recompute rolling+rank for [min_changed_date, max_changed_date + (lookback_days - 1)]
-    # because edits on a day can affect the median/rank for subsequent days in the window.
-    con.execute(
-        f"""
-        CREATE TEMP TABLE _chg_dates AS
-        SELECT DISTINCT
-        {day_key_expr} AS date
-        FROM read_parquet($1, hive_partitioning=1);
-        """,
-        [changed_paths],
-    )
+    if changed_paths:
+        # Determine affected date range.
+        # We recompute rolling+rank for [min_changed_date, max_changed_date + (lookback_days - 1)]
+        # because edits on a day can affect the median/rank for subsequent days in the window.
+        con.execute(
+            f"""
+            CREATE TEMP TABLE _chg_dates AS
+            SELECT DISTINCT
+            {day_key_expr} AS date
+            FROM read_parquet($1, hive_partitioning=1);
+            """,
+            [paths_for_base],
+        )
 
-    dr = con.execute("SELECT MIN(date)::VARCHAR, MAX(date)::VARCHAR FROM _chg_dates;").fetchone()
-    con.execute("DROP TABLE _chg_dates;")
+        dr = con.execute("SELECT MIN(date)::VARCHAR, MAX(date)::VARCHAR FROM _chg_dates;").fetchone()
+        con.execute("DROP TABLE _chg_dates;")
 
-    if not dr or dr[0] is None or dr[1] is None:
-        return {"ok": True, "market": market, "mode": "incremental_no_dates"}
+        if not dr or dr[0] is None or dr[1] is None:
+            return {"ok": True, "market": market, "mode": "incremental_no_dates"}
 
-    min_d = datetime.fromisoformat(dr[0]).date()
-    max_d = datetime.fromisoformat(dr[1]).date()
-    date_from = min_d.isoformat()
-    date_to = (max_d + timedelta(days=lookback_days - 1)).isoformat()
-    max_available = con.execute(
-        """
-        SELECT MAX(date)::VARCHAR
-        FROM md.md_liquidity_daily
-        WHERE market = ?
-          AND timeframe = ?;
-        """,
-        [market, timeframe_filter],
-    ).fetchone()
-    if max_available and max_available[0] is not None:
-        max_available_date = datetime.fromisoformat(max_available[0]).date()
-        if max_available_date < datetime.fromisoformat(date_to).date():
-            date_to = max_available_date.isoformat()
+        min_d = datetime.fromisoformat(dr[0]).date()
+        max_d = datetime.fromisoformat(dr[1]).date()
+        date_from = min_d.isoformat()
+        date_to = (max_d + timedelta(days=lookback_days - 1)).isoformat()
+        max_available = con.execute(
+            """
+            SELECT MAX(date)::VARCHAR
+            FROM md.md_liquidity_daily
+            WHERE market = ?
+              AND timeframe = ?;
+            """,
+            [market, timeframe_filter],
+        ).fetchone()
+        if max_available and max_available[0] is not None:
+            max_available_date = datetime.fromisoformat(max_available[0]).date()
+            if max_available_date < datetime.fromisoformat(date_to).date():
+                date_to = max_available_date.isoformat()
 
-    _recompute_rolling_and_rank_for_date_range(
+        _recompute_rolling_and_rank_for_date_range(
+            con,
+            market,
+            timeframe_filter,
+            date_from=date_from,
+            date_to=date_to,
+            lookback_days=lookback_days,
+            top_n=top_n,
+        )
+
+        return {
+            "ok": True,
+            "market": market,
+            "mode": "incremental",
+            "timeframe_filter": timeframe_filter,
+            "changed_klines_files": len(changed_paths),
+            "missing_keys": len(missing_paths),
+            "rolling_recomputed_from": date_from,
+            "rolling_recomputed_to": date_to,
+            "lookback_days": lookback_days,
+            "top_n": top_n,
+        }
+
+    normalized_missing_keys: list[tuple[str, date]] = []
+    for symbol, day in missing_keys_list:
+        day_val = day if isinstance(day, date) else date.fromisoformat(str(day))
+        normalized_missing_keys.append((symbol, day_val))
+
+    _recompute_rolling_and_rank_for_keys(
         con,
         market,
         timeframe_filter,
-        date_from=date_from,
-        date_to=date_to,
+        keys=normalized_missing_keys,
         lookback_days=lookback_days,
         top_n=top_n,
     )
@@ -1412,11 +1816,9 @@ def build_or_update_liquidity_daily(
     return {
         "ok": True,
         "market": market,
-        "mode": "incremental",
+        "mode": "incremental_missing_keys",
         "timeframe_filter": timeframe_filter,
-        "changed_klines_files": len(changed_paths),
-        "rolling_recomputed_from": date_from,
-        "rolling_recomputed_to": date_to,
+        "missing_keys": len(missing_paths),
         "lookback_days": lookback_days,
         "top_n": top_n,
     }

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 __all__ = [
     "build_metadata",
     "build_kline_integrity",
+    "backfill_derived_from_coverage",
     "resample_1m_to_1d",
     "ingest_local_downloads_to_lake",
     "fetch_futures",
@@ -16,6 +17,7 @@ if TYPE_CHECKING:
     from .api import (
         build_metadata,
         build_kline_integrity,
+        backfill_derived_from_coverage,
         fetch_futures,
         ingest_local_downloads_to_lake,
         resample_1m_to_1d,

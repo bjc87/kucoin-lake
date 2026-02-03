@@ -95,6 +95,16 @@ Inputs:
 - `iter_data_parquets(...)` scans filesystem candidates scoped to timeframe_filter.
 - `get_new_or_changed_files(...)` detects new/changed files via size/mtime.
 
+Optional scan scoping (faster test/backfill runs):
+- You can limit the manifest scan to specific symbols and/or a UTC date window.
+- Date windows are interpreted as:
+  - date partitions for 1m datasets (date=YYYY-MM-DD)
+  - month partitions for derived timeframes (month=YYYY-MM)
+- Example CLI (last 7 days for two symbols):
+  - `kucoin-lake build-metadata --nas-root ... --meta-db-path ... --timeframe-filter 1m --symbols BTCUSDTM,ETHUSDTM --date-start 2025-12-01 --date-end 2025-12-07`
+- Example CLI (bounded backfill, 1d month partitions):
+  - `kucoin-lake build-metadata --nas-root ... --meta-db-path ... --timeframe-filter 1d --symbols BTCUSDTM --date-start 2025-11-15 --date-end 2026-01-02`
+
 3.2 Step B: Incremental coverage update
 - For each dataset, recompute coverage only for impacted symbol-days.
 - No global deletes.
@@ -319,6 +329,59 @@ resample_bars(
     timeframe_src="1m",
     timeframe_dst="1d",
 )
+```
+
+--------------------------------------------------------------------
+12. FETCH + INGEST RUNBOOK
+--------------------------------------------------------------------
+
+Use the CLI to download futures ZIPs and then ingest them into the lake:
+
+```bash
+# 1) Fetch futures ZIPs
+kucoin-lake fetch-futures \
+  --out-root /Users/you/coding/data/kucoin \
+  --symbols BTCUSDTM \
+  --datatype klines mark index funding \
+  --days 3 \
+  --timeframe 1m
+
+# 2) Ingest ZIPs into the lake
+kucoin-lake ingest-local-downloads-to-lake \
+  --startdate 2026-01-01 \
+  --enddate 2026-01-03 \
+  --assets BTCUSDTM \
+  --timeframes 1m \
+  --local-root /Users/you/coding/data/kucoin/data
+
+# local-root can be either the daily root itself or its parent:
+# - /Users/you/coding/data/kucoin/data/futures/daily
+# - /Users/you/coding/data/kucoin/data (contains futures/daily)
+```
+
+Expected download structure under the output root:
+
+```
+/Users/you/coding/data/kucoin/
+  data/
+    futures/
+      daily/
+        klines/
+          BTCUSDTM/
+            1m/
+              BTCUSDTM-1m-2026-01-01.zip
+              BTCUSDTM-1m-2026-01-02.zip
+        fundingRates/
+          BTCUSDTM/
+            BTCUSDTM-fundingRates-2026-01-01.zip
+        mark/
+          BTCUSDTM/
+            1m/
+              BTCUSDTM-1m-2026-01-01.zip
+        index/
+          BTCUSDTM/
+            1m/
+              BTCUSDTM-1m-2026-01-01.zip
 ```
 
 --------------------------------------------------------------------

@@ -39,6 +39,7 @@ dist/
 *.duckdb-shm
 *.sqlite
 *.db
+*.DS_Store
 
 # ----------------------------------------
 # Data files (NEVER commit real data)
@@ -80,6 +81,7 @@ dist/
 # ----------------------------------------
 !tests/fixtures/**
 !tests/fixtures/**/data.parquet
+tests/fixtures/**/.DS_Store
 
 # ----------------------------------------
 # Logs / outputs

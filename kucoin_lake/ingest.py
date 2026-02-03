@@ -10,11 +10,17 @@ from datetime import date
 from typing import Iterable
 from pathlib import Path
 import shutil
+import sys
 
 import duckdb
 
-import time
 from dataclasses import dataclass
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from kucoin_lake.paths import month_starts
 
 try:
     from tqdm.auto import tqdm
@@ -70,6 +76,8 @@ def format_summary(name: str, c: RunCounters) -> str:
 # Helpers
 # -----------------------------
 
+DATASET_DIRS = ("klines", "fundingRates", "mark", "index")
+
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -113,6 +121,29 @@ def extract_single_csv(zip_path: Path, tmp_dir: Path) -> Path:
     if len(csvs) != 1:
         raise RuntimeError(f"Expected 1 CSV in {zip_path}, found {len(csvs)}: {csvs}")
     return csvs[0]
+
+def _has_dataset_dirs(root: Path) -> bool:
+    return any((root / ds).is_dir() for ds in DATASET_DIRS)
+
+def resolve_local_download_root(local_root: Path, market: str | None = None) -> Path:
+    if _has_dataset_dirs(local_root):
+        return local_root
+
+    market_name = market or "futures"
+    market_daily = local_root / market_name / "daily"
+    if _has_dataset_dirs(market_daily):
+        return market_daily
+
+    futures_daily = local_root / "futures" / "daily"
+    if _has_dataset_dirs(futures_daily):
+        return futures_daily
+
+    expected = ", ".join(DATASET_DIRS)
+    raise ValueError(
+        "Could not resolve local download root. Expected dataset directories "
+        f"({expected}) directly under {local_root}, or under "
+        f"{local_root}/<market>/daily (market={market_name})."
+    )
 
 # def expected_out_path(zip_path: Path) -> Path:
 #     """
@@ -201,6 +232,52 @@ def build_done_set(
     return done
 
 
+def _expected_out_path(dataset: str, zip_path: Path) -> Path:
+    if dataset == "klines":
+        asset = zip_path.parent.parent.name
+        timeframe = zip_path.parent.name
+        date_str = parsedate_from_stem(zip_path)
+        return out_path_klines(asset, timeframe, date_str)
+    if dataset == "funding":
+        asset = zip_path.parent.name
+        date_str = parsedate_from_stem(zip_path)
+        return out_path_funding(asset, date_str)
+    if dataset == "mark":
+        asset = zip_path.parent.parent.name
+        timeframe = zip_path.parent.name
+        date_str = parsedate_from_stem(zip_path)
+        return out_path_mark(asset, timeframe, date_str)
+    if dataset == "index":
+        asset = zip_path.parent.parent.name
+        timeframe = zip_path.parent.name
+        date_str = parsedate_from_stem(zip_path)
+        return out_path_index(asset, timeframe, date_str)
+    raise ValueError(f"Unknown dataset: {dataset}")
+
+
+def build_done_set_from_targets(
+    *,
+    klines_zips: list[Path],
+    funding_zips: list[Path],
+    mark_zips: list[Path],
+    index_zips: list[Path],
+    nas_root: Path = NAS_ROOT,
+) -> set[str]:
+    done: set[str] = set()
+    targets = [
+        ("klines", klines_zips),
+        ("funding", funding_zips),
+        ("mark", mark_zips),
+        ("index", index_zips),
+    ]
+    for dataset, zips in targets:
+        for zp in zips:
+            out_path = _expected_out_path(dataset, zp)
+            if out_path.exists():
+                done.add(out_path.relative_to(nas_root).as_posix())
+    return done
+
+
 def atomic_copy_to_parquet(
     con: duckdb.DuckDBPyConnection,
     select_sql: str,
@@ -267,17 +344,6 @@ def detect_delim(csv_path: Path) -> str:
 # Sharding
 # -----------------------------
 
-def _month_starts(start: date, end: date):
-    y, m = start.year, start.month
-    cur = date(y, m, 1)
-    while cur <= end:
-        yield cur
-        if m == 12:
-            y, m = y + 1, 1
-        else:
-            m += 1
-        cur = date(y, m, 1)
-
 def list_local_ohlc_zips_sharded(
     root: Path,
     dataset: str,          # "klines" | "mark" | "index"
@@ -310,7 +376,7 @@ def list_local_ohlc_zips_sharded(
             folder = ds_root / sym / tf
             if not folder.exists():
                 continue
-            for m in _month_starts(start, end):
+            for m in month_starts(start, end):
                 ym = f"{m.year:04d}-{m.month:02d}"
                 pat = f"{sym}-{tf}-{ym}-*.zip"
                 out.extend(folder.glob(pat))
@@ -350,7 +416,7 @@ def list_local_funding_zips_sharded(
         folder = ds_root / sym
         if not folder.exists():
             continue
-        for m in _month_starts(start, end):
+        for m in month_starts(start, end):
             ym = f"{m.year:04d}-{m.month:02d}"
             pat = f"{sym}-fundingRates-{ym}-*.zip"
             out.extend(folder.glob(pat))
@@ -799,11 +865,12 @@ def convert_funding_zip(
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             csv_path = extract_single_csv(zip_path, td_path)
-            fields = read_header_fields(csv_path, ",")
-            expected = {"open", "high", "low", "close"}
+            delim = detect_delim(csv_path)
+            fields = read_header_fields(csv_path, delim)
+            expected = {"symbol", "time", "fundingRate"}
             if not expected.issubset(fields):
                 raise ValueError(
-                    "Unexpected schema for mark zip: expected columns "
+                    "Unexpected schema for funding zip: expected columns "
                     f"{sorted(expected)} but got: {fields}"
                 )
 
@@ -815,7 +882,7 @@ def convert_funding_zip(
                     CAST(fundingRate AS DOUBLE) AS funding_rate
                 FROM read_csv(
                     '{csv_path.as_posix()}',
-                    delim=',',
+                    delim='{delim}',
                     header=true,
                     auto_detect=false,
                     strict_mode=false,
@@ -1282,6 +1349,7 @@ def resolvedates_ingest_strict(
 def build_zip_targets_ingest_strict(
     local_root: str | Path,
     *,
+    market: str | None = None,
     startdate: str,
     enddate: str,
     assets: list[str] | None = None,
@@ -1300,7 +1368,7 @@ def build_zip_targets_ingest_strict(
     Returns:
       (klines_zips, funding_zips, mark_zips, index_zips, start, end)
     """
-    local_root = Path(local_root)
+    local_root = resolve_local_download_root(Path(local_root), market)
     start, end = resolvedates_ingest_strict(startdate=startdate, enddate=enddate)
 
     klines_zips = (
@@ -1473,6 +1541,8 @@ def run_ingest(
     include_funding: bool = True,
     include_mark: bool = True,
     include_index: bool = True,
+    done_set_mode: str = "scan",
+    market: str | None = None,
     local_root: Path = LOCAL_ROOT,
     show_progress: bool = True,
     verbose: bool = False,
@@ -1481,8 +1551,12 @@ def run_ingest(
     Jupyter-first ingest API.
 
     - Filters by date range (inclusive), assets, and timeframes.
-    - Safe to rerun: skips anything already written (done-set) and uses atomic writes.
+    - Safe to rerun: can skip anything already written (done-set) and uses atomic writes.
     - Logs failures to ERRORS_LOG.
+    - done_set_mode:
+        - "scan": build done-set by scanning the NAS (safer, slower on large lakes)
+        - "targets": build done-set only from the planned zip targets (fast for small runs)
+        - "skip": do not build done-set (fastest; existing outputs will be overwritten)
 
     Dates must be ISO 'YYYY-MM-DD' if provided.
     """
@@ -1496,6 +1570,7 @@ def run_ingest(
 
     klines_zips, funding_zips, mark_zips, index_zips, start, end = build_zip_targets_ingest_strict(
         local_root,
+        market=market,
         startdate=startdate,
         enddate=enddate,
         assets=assets,
@@ -1512,9 +1587,29 @@ def run_ingest(
     if include_mark: datasets.add("mark")
     if include_index: datasets.add("index")
 
-    if verbose:
-        print("Building done set...")
-    done = build_done_set(datasets=datasets)
+    done_set_mode = done_set_mode.lower()
+    if done_set_mode == "scan":
+        if verbose:
+            print("Building done set (scan)...")
+        done = build_done_set(datasets=datasets)
+    elif done_set_mode == "targets":
+        if verbose:
+            print("Building done set (targets)...")
+        done = build_done_set_from_targets(
+            klines_zips=klines_zips,
+            funding_zips=funding_zips,
+            mark_zips=mark_zips,
+            index_zips=index_zips,
+        )
+    elif done_set_mode == "skip":
+        if verbose:
+            print("Skipping done set build...")
+        done = set()
+    else:
+        raise ValueError(
+            "done_set_mode must be one of: 'scan', 'targets', 'skip'. "
+            f"Got: {done_set_mode}"
+        )
     if verbose:
         print(f"Done set built ({len(done):,} parquet files)")
 
@@ -1541,6 +1636,7 @@ def run_ingest(
             "include_funding": include_funding,
             "include_mark": include_mark,
             "include_index": include_index,
+            "done_set_mode": done_set_mode,
         },
         "resolved_window": {"start": start.isoformat(), "end": end.isoformat()},
         "targets": {

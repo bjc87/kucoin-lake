@@ -1,19 +1,14 @@
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from datetime import date, datetime, timezone, timedelta
-import sys
 import time
-import requests
 from urllib.parse import urlencode
 from xml.etree import ElementTree as ET
-from typing import Iterable
+
+import requests
 from requests import Session
 from tqdm.auto import tqdm
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 from kucoin_lake.constants import DATASETS, DataType
 from kucoin_lake.paths import (
@@ -26,6 +21,7 @@ from kucoin_lake.paths import (
 
 BASE = "https://historical-data.kucoin.com/"
 
+
 # -----------------------------
 # Normalisation + date helpers
 # -----------------------------
@@ -33,6 +29,7 @@ BASE = "https://historical-data.kucoin.com/"
 def _parse_date(s: str) -> date:
     # expects YYYY-MM-DD
     return date.fromisoformat(s.strip())
+
 
 def _resolve_date_range(
     *,
@@ -59,10 +56,22 @@ def _resolve_date_range(
         raise ValueError("start_date must be <= end_date")
     return start, end
 
+
 def _as_list(x: str | list[str] | tuple[str, ...]) -> list[str]:
     if isinstance(x, (list, tuple)):
         return list(x)
     return [x]
+
+
+def _normalize_datatype(dt: str) -> DataType:
+    dt_norm = dt.strip()
+    if dt_norm.lower() == "fundingrates":
+        return "funding"
+    if dt_norm in DATASETS:
+        return dt_norm  # type: ignore[return-value]
+    raise ValueError(
+        f"Unknown datatype '{dt}'. Expected one of {sorted(DATASETS)} or 'fundingRates'."
+    )
 
 
 # -----------------------------
@@ -101,10 +110,6 @@ def s3_list_page(prefix: str, delimiter: str = "", max_keys: int = 1000) -> dict
 
     return {"files": files, "url": url}
 
-# -----------------------------
-# Datatype config (futures only)
-# -----------------------------
-
 
 # -----------------------------
 # Sharded key listing
@@ -139,6 +144,7 @@ def list_month_keys_futures(
     page = s3_list_page(prefix, delimiter="", max_keys=1000)
     return [k for k in page["files"] if k.endswith(".zip")]
 
+
 def list_keys_futures(
     *,
     symbol: str,
@@ -167,47 +173,17 @@ def list_keys_futures(
     filtered.sort()
     return filtered
 
+
 # -----------------------------
 # Download utilities
 # -----------------------------
-
-# def download_key_retry(key: str, out_root: Path, retries: int = 6, backoff_s: float = 1.0, timeout=(10, 300)) -> str:
-#     url = BASE + key
-#     out_path = out_root / key
-#     out_path.parent.mkdir(parents=True, exist_ok=True)
-#     tmp = out_path.with_suffix(out_path.suffix + ".part")
-
-#     if out_path.exists():
-#         return "exists"
-
-#     for attempt in range(1, retries + 1):
-#         try:
-#             with requests.get(url, stream=True, timeout=timeout, headers={"User-Agent": "Mozilla/5.0"}) as r:
-#                 if r.status_code == 404:
-#                     return "missing_remote"
-#                 r.raise_for_status()
-#                 with open(tmp, "wb") as f:
-#                     for chunk in r.iter_content(chunk_size=1024 * 1024):
-#                         if chunk:
-#                             f.write(chunk)
-#             tmp.replace(out_path)
-#             return "downloaded"
-#         except Exception:
-#             try:
-#                 if tmp.exists():
-#                     tmp.unlink()
-#             except Exception:
-#                 pass
-#             if attempt == retries:
-#                 raise
-#             time.sleep(backoff_s * attempt)
 
 def download_key_retry(
     key: str,
     out_root: Path,
     retries: int = 6,
     backoff_s: float = 1.0,
-    timeout=(10, 300),
+    timeout: tuple[float, float] = (10, 300),
     session: Session | None = None,
 ) -> str:
     url = BASE + key
@@ -263,7 +239,7 @@ def download_key_retry(
             tmp.replace(out_path)
             return "downloaded"
 
-        except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as e:
+        except (requests.Timeout, requests.ConnectionError, requests.HTTPError):
             # cleanup partial
             try:
                 if tmp.exists():
@@ -289,8 +265,12 @@ def download_key_retry(
 
             time.sleep(backoff_s * attempt)
 
+    raise RuntimeError("Unexpected retry loop termination")
+
+
 def local_existing_keys(out_root: Path, keys: list[str]) -> set[str]:
     return {k for k in keys if (out_root / k).exists()}
+
 
 def missing_keys(out_root: Path, keys: list[str]) -> list[str]:
     out = []
@@ -299,6 +279,7 @@ def missing_keys(out_root: Path, keys: list[str]) -> list[str]:
             out.append(k)
     return out
 
+
 # -----------------------------
 # Unified Jupyter-friendly API
 # -----------------------------
@@ -306,7 +287,7 @@ def missing_keys(out_root: Path, keys: list[str]) -> list[str]:
 def fetch_futures(
     out_root: str | Path,
     symbols: str | list[str],
-    datatype: DataType | list[DataType],
+    datatype: DataType | list[DataType] | str | list[str],
     *,
     timeframe: str = "1m",
     start_date: str | None = None,
@@ -315,7 +296,7 @@ def fetch_futures(
     sleep_s: float = 0.02,
     retries: int = 6,
     backoff_s: float = 1.0,
-    timeout=(10, 300),
+    timeout: tuple[float, float] = (10, 300),
     dry_run: bool = False,
     show_progress: bool = True,
     verbose: bool = False,
@@ -324,7 +305,7 @@ def fetch_futures(
     Fetch KuCoin historical futures daily zips for given symbols + datatypes over a date window.
 
     - symbols: "XAIUSDTM" or ["BTCUSDTM", ...]
-    - datatype: "klines" | "funding" | "mark" | "index" or list of those
+    - datatype: "klines" | "funding" | "mark" | "index" (or "fundingRates") or list of those
     - window: either days=int OR (start_date, end_date) as "YYYY-MM-DD"
     - avoids re-downloading files that already exist under out_root/<bucket-key>
     - normalises XBT* -> BTC* (only at start of symbol string)
@@ -335,7 +316,8 @@ def fetch_futures(
     out_root.mkdir(parents=True, exist_ok=True)
 
     syms = sorted(set(normalize_symbol(s) for s in _as_list(symbols)))
-    dts: list[DataType] = _as_list(datatype)  # type: ignore
+    dts_raw = _as_list(datatype)  # type: ignore[arg-type]
+    dts: list[DataType] = [_normalize_datatype(dt) for dt in dts_raw]
 
     start, end = _resolve_date_range(start_date=start_date, end_date=end_date, days=days)
 
@@ -382,7 +364,7 @@ def fetch_futures(
             leave=True,
         )
 
-    def _tick():
+    def _tick() -> None:
         if pbar is None:
             return
         pbar.update(1)
@@ -465,104 +447,3 @@ def fetch_futures(
         pbar.close()
 
     return summary
-
-# def fetch_futures(
-#     out_root: str | Path,
-#     symbols: str | list[str],
-#     datatype: DataType | list[DataType],
-#     *,
-#     timeframe: str = "1m",
-#     start_date: str | None = None,
-#     end_date: str | None = None,
-#     days: int | None = None,
-#     sleep_s: float = 0.02,
-#     retries: int = 6,
-#     backoff_s: float = 1.0,
-#     timeout=(10, 300),
-#     dry_run: bool = False,
-# ) -> dict:
-#     """
-#     Fetch KuCoin historical futures daily zips for given symbols + datatypes over a date window.
-
-#     - symbols: "XAIUSDTM" or ["BTCUSDTM", ...]
-#     - datatype: "klines" | "funding" | "mark" | "index" or list of those
-#     - window: either days=int OR (start_date, end_date) as "YYYY-MM-DD"
-#     - avoids re-downloading files that already exist under out_root/<bucket-key>
-#     - normalises XBT* -> BTC* (only at start of symbol string)
-#     """
-#     out_root = Path(out_root)
-#     syms = [normalize_symbol(s) for s in _as_list(symbols)]
-#     dts: list[DataType] = _as_list(datatype)  # type: ignore
-#     start, end = _resolve_date_range(start_date=start_date, end_date=end_date, days=days)
-
-#     # Clamp end to today (avoid pointless 404s)
-#     yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1))
-#     if end > yesterday:
-#         end = yesterday
-
-#     if start > end:
-#         raise ValueError(f"Resolved date window is empty: start={start} end={end}")
-
-#     # Precompute dates once
-#     dates = list(iter_dates(start, end))
-
-#     # Optional: dedupe symbols
-#     syms = sorted(set(normalize_symbol(s) for s in _as_list(symbols)))
-
-#     summary = {
-#         "start": start.isoformat(),
-#         "end": end.isoformat(),
-#         "timeframe": timeframe,
-#         "symbols": len(syms),
-#         "datatypes": dts,
-#         "planned": 0,
-#         "missing_local": 0,
-#         "missing_remote": 0,
-#         "downloaded": 0,
-#         "skipped_exists": 0,
-#         "errors": 0,
-#         "per_symbol": [],
-#     }
-
-#     sess = requests.Session()
-
-#     for sym in syms:
-#         per = {"symbol": sym, "by_type": {}}
-#         for dt in dts:
-#             keys = [key_for_futures_zip(sym, dt, d, timeframe=timeframe) for d in dates]
-#             missing_local = missing_keys(out_root, keys)
-
-#             ...
-#             per["by_type"][dt] = {
-#                 "keys": len(keys),
-#                 "missing_local": len(missing_local),
-#                 "first": keys[0] if keys else None,
-#                 "last": keys[-1] if keys else None,
-#                 "missing_first": missing_local[0] if missing_local else None,
-#                 "missing_last": missing_local[-1] if missing_local else None,
-#             }
-
-#             if dry_run:
-#                 continue
-
-#             for k in missing_local:
-#                 try:
-#                     status = download_key_retry(k, out_root, retries=retries, backoff_s=backoff_s, timeout=timeout, session=sess)
-#                     if status == "downloaded":
-#                         summary["downloaded"] += 1
-#                     elif status == "missing_remote":
-#                         summary["missing_remote"] += 1
-#                     elif status == "exists":
-#                         summary["skipped_exists"] += 1
-#                     elif status in ("forbidden",) or status.startswith("client_error_"):
-#                         summary["errors"] += 1
-#                     else:
-#                         summary["errors"] += 1
-#                     if sleep_s:
-#                         time.sleep(sleep_s)
-#                 except Exception as e:
-#                     summary["errors"] += 1
-
-#         summary["per_symbol"].append(per)
-
-#     return summary

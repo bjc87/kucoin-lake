@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from datetime import date, timedelta
 from pathlib import Path
 
 import duckdb
@@ -35,6 +37,74 @@ def _add_ts_column_to_1d_files(tmp_lake_root: Path) -> None:
             tmp_path.replace(path)
     finally:
         con.close()
+
+
+def _touch(path: Path) -> None:
+    stat = path.stat()
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 1_000_000))
+
+
+def _write_synthetic_1m_day(
+    con: duckdb.DuckDBPyConnection,
+    path: Path,
+    *,
+    symbol: str,
+    day: date,
+    volume: float,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    ts = f"{day.isoformat()} 00:00:00+00"
+    path_sql = path.as_posix().replace("'", "''")
+    con.execute(
+        f"""
+        COPY (
+            SELECT
+                0::BIGINT AS time_ms,
+                CAST(? AS TIMESTAMP) AS ts,
+                1.0::DOUBLE AS open,
+                1.0::DOUBLE AS high,
+                1.0::DOUBLE AS low,
+                1.0::DOUBLE AS close,
+                CAST(? AS DOUBLE) AS volume,
+                CAST(? AS DATE) AS date,
+                CAST(? AS VARCHAR) AS symbol,
+                '1m'::VARCHAR AS timeframe
+        ) TO '{path_sql}' (FORMAT PARQUET);
+        """,
+        [ts, volume, day.isoformat(), symbol],
+    )
+
+
+def _seed_synthetic_klines(tmp_lake_root: Path, *, start_day: date, days: int, symbol: str) -> None:
+    con = duckdb.connect()
+    try:
+        for offset in range(days):
+            day = start_day + timedelta(days=offset)
+            path = (
+                tmp_lake_root
+                / "futures"
+                / "klines"
+                / "timeframe=1m"
+                / f"symbol={symbol}"
+                / f"date={day.isoformat()}"
+                / "data.parquet"
+            )
+            _write_synthetic_1m_day(con, path, symbol=symbol, day=day, volume=float(offset + 1))
+    finally:
+        con.close()
+
+
+def _snapshot_liquidity(con: duckdb.DuckDBPyConnection, timeframe: str) -> dict:
+    rows = con.execute(
+        """
+        SELECT market, timeframe, symbol, date, computed_at_utc
+        FROM md.md_liquidity_daily
+        WHERE market = 'futures' AND timeframe = $1
+        ORDER BY symbol, date;
+        """,
+        [timeframe],
+    ).fetchall()
+    return {(row[0], row[1], row[2], row[3]): row[4] for row in rows}
 
 
 def _snapshot_timeframe_stats(con: duckdb.DuckDBPyConnection, timeframe: str) -> dict:
@@ -225,3 +295,79 @@ def test_idempotent_1m_runs(tmp_lake_root: Path, tmp_duckdb_path: Path) -> None:
         con.close()
 
     assert before == after
+
+
+def test_liquidity_noop_when_no_klines_changes(tmp_lake_root: Path, tmp_duckdb_path: Path) -> None:
+    _seed_synthetic_klines(tmp_lake_root, start_day=date(2025, 12, 25), days=3, symbol="ZRXUSDTM")
+
+    build_or_update_metadata(
+        tmp_lake_root,
+        market="futures",
+        datasets=["klines", "mark", "index", "funding"],
+        meta_db_path=tmp_duckdb_path,
+        timeframe_filter="1m",
+    )
+
+    con = connect_meta_db(tmp_duckdb_path)
+    try:
+        before_snapshot = _snapshot_liquidity(con, "1m")
+    finally:
+        con.close()
+
+    build_or_update_metadata(
+        tmp_lake_root,
+        market="futures",
+        datasets=["klines", "mark", "index", "funding"],
+        meta_db_path=tmp_duckdb_path,
+        timeframe_filter="1m",
+    )
+
+    con = connect_meta_db(tmp_duckdb_path)
+    try:
+        after_snapshot = _snapshot_liquidity(con, "1m")
+    finally:
+        con.close()
+
+    assert len(before_snapshot) == len(after_snapshot)
+    assert before_snapshot == after_snapshot
+
+    touched = (
+        tmp_lake_root
+        / "futures"
+        / "klines"
+        / "timeframe=1m"
+        / "symbol=ZRXUSDTM"
+        / "date=2025-12-30"
+        / "data.parquet"
+    )
+    _touch(touched)
+
+    build_or_update_metadata(
+        tmp_lake_root,
+        market="futures",
+        datasets=["klines", "mark", "index", "funding"],
+        meta_db_path=tmp_duckdb_path,
+        timeframe_filter="1m",
+    )
+
+    con = connect_meta_db(tmp_duckdb_path)
+    try:
+        touched_snapshot = _snapshot_liquidity(con, "1m")
+    finally:
+        con.close()
+
+    assert len(after_snapshot) == len(touched_snapshot)
+
+    change_date = date(2025, 12, 30)
+    changed_keys = []
+    unchanged_keys = []
+    for key, computed_at in touched_snapshot.items():
+        if key[3] < change_date:
+            unchanged_keys.append(key)
+            assert computed_at == after_snapshot[key]
+        else:
+            changed_keys.append(key)
+            assert computed_at != after_snapshot[key]
+
+    assert changed_keys
+    assert unchanged_keys

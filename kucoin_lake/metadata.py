@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timedelta
+import glob as globlib
 from pathlib import Path
-from typing import Iterable, Iterator, Optional, Sequence
-import sys
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+from typing import Iterable, Optional, Sequence
 
 import duckdb
 
 from kucoin_lake.constants import DEFAULT_FUTURES_DATASETS, FUTURES_DATASETS_WITH_TIMEFRAME
+from kucoin_lake.manifest import (
+    FileInfo,
+    get_new_or_changed_files,
+    iter_data_parquets,
+    upsert_manifest,
+    utc_now_iso,
+)
 from kucoin_lake.paths import dataset_glob
 from kucoin_lake.util import expected_rows_for_day
 
@@ -20,107 +23,21 @@ DEFAULT_META_SUBDIR = "_meta"
 DEFAULT_META_DBNAME = "metadata.duckdb"
 
 
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+@dataclass(frozen=True)
+class ScanScope:
+    symbols: Optional[Sequence[str]] = None
+    date_start: Optional[date] = None
+    date_end: Optional[date] = None
+
+    @property
+    def is_scoped(self) -> bool:
+        return bool(self.symbols or self.date_start or self.date_end)
+
 
 def default_local_meta_db_path(market: str) -> Path:
     base = Path.home() / "coding" / "data" / "kucoin" / "_meta"
     base.mkdir(parents=True, exist_ok=True)
     return base / f"metadata_{market}.duckdb"
-
-
-
-@dataclass(frozen=True)
-class FileInfo:
-    market: str
-    dataset: str
-    file_path: str  # absolute
-    file_rel: str   # relative to nas_root
-    file_size_bytes: int
-    mtime_ns: int
-
-def iter_data_parquets(
-    nas_root: str | Path,
-    *,
-    market: str,
-    datasets: Iterable[str],
-    timeframe_filter: Optional[str] = None,
-    datasets_with_timeframe: Optional[set[str]] = None,
-) -> Iterator[FileInfo]:
-    """
-    Iterate Parquet data files under the NAS lake and return FileInfo objects.
-
-    This is designed to be FAST for derived timeframes:
-      - If timeframe_filter is provided, datasets that use timeframe partitions are
-        scoped to timeframe={timeframe_filter} rather than scanning all timeframes.
-
-    Parameters
-    ----------
-    nas_root:
-        Root of the data lake (e.g. /Volumes/quant_data/kucoin)
-    market:
-        'futures' (now) and future-proofed for 'spot'
-    datasets:
-        e.g. ('klines', 'mark', 'index', 'funding')
-    timeframe_filter:
-        If provided, only scan this timeframe for datasets that have timeframe partitions
-        (e.g. '1m', '1d', '1h'). Funding is unaffected (no timeframe dir).
-    datasets_with_timeframe:
-        Provide your existing FUTURES_DATASETS_WITH_TIMEFRAME as a set here, or leave None
-        to use a conservative default for your current futures setup.
-
-    Yields
-    ------
-    FileInfo
-    """
-    nas_root = Path(nas_root)
-
-    # Prefer wiring your existing constant in by passing datasets_with_timeframe=...
-    # Default here is your current futures setup.
-    if datasets_with_timeframe is None:
-        datasets_with_timeframe = {"klines", "mark", "index"}
-
-    # Normalize for safety
-    datasets_list: Sequence[str] = list(datasets)
-
-    for ds in datasets_list:
-
-        # Datasets without timeframe partitions (e.g. funding)
-        if ds not in datasets_with_timeframe:
-            # Only include these in 1m builds
-            if timeframe_filter != "1m":
-                continue
-            tf = "*"
-        else:
-            # Timeframed datasets: scope to the requested timeframe
-            tf = timeframe_filter if timeframe_filter else "*"
-
-        glob_pat = dataset_glob(nas_root, market, ds, timeframe=tf)
-
-        # Use pathlib globbing (fast enough, avoids DuckDB).
-        # NOTE: this will expand wildcard patterns; it's a filesystem walk.
-        for p in nas_root.glob(Path(glob_pat).relative_to(nas_root).as_posix()):
-            if not p.is_file():
-                continue
-            if p.name != "data.parquet":
-                continue
-
-            try:
-                st = p.stat()
-            except FileNotFoundError:
-                # File disappeared between glob and stat; ignore.
-                continue
-
-            file_rel = p.relative_to(nas_root).as_posix()
-
-            yield FileInfo(
-                file_rel=file_rel,
-                market=market,
-                dataset=ds,
-                file_path=p.as_posix(),
-                file_size_bytes=int(st.st_size),
-                mtime_ns=int(st.st_mtime_ns),
-            )
 
 
 DDL = """
@@ -253,69 +170,6 @@ def connect_meta_db(db_path: Path) -> duckdb.DuckDBPyConnection:
     return con
 
 
-def upsert_manifest(con: duckdb.DuckDBPyConnection, files: Sequence[FileInfo]) -> None:
-    if not files:
-        return
-    now = utc_now_iso()
-
-    con.execute("CREATE TEMP TABLE _stg_manifest AS SELECT * FROM md.md_file_manifest WHERE 1=0;")
-    con.executemany(
-        """
-        INSERT INTO _stg_manifest (
-            file_rel, market, dataset, file_path, file_size_bytes, mtime_ns, first_seen_utc, last_seen_utc
-        )
-        VALUES (?, ?, ?, ?, ?, ?, CAST(? AS TIMESTAMP), CAST(? AS TIMESTAMP));
-        """,
-        [(f.file_rel, f.market, f.dataset, f.file_path, f.file_size_bytes, f.mtime_ns, now, now) for f in files],
-    )
-
-    con.execute(
-        """
-        MERGE INTO md.md_file_manifest t
-        USING _stg_manifest s
-        ON t.file_rel = s.file_rel
-        WHEN MATCHED THEN UPDATE SET
-            market = s.market,
-            dataset = s.dataset,
-            file_path = s.file_path,
-            file_size_bytes = s.file_size_bytes,
-            mtime_ns = s.mtime_ns,
-            last_seen_utc = s.last_seen_utc
-        WHEN NOT MATCHED THEN INSERT (
-            file_rel, market, dataset, file_path, file_size_bytes, mtime_ns, first_seen_utc, last_seen_utc
-        ) VALUES (
-            s.file_rel, s.market, s.dataset, s.file_path, s.file_size_bytes, s.mtime_ns, s.first_seen_utc, s.last_seen_utc
-        );
-        """
-    )
-    con.execute("DROP TABLE _stg_manifest;")
-
-def get_new_or_changed_files(con: duckdb.DuckDBPyConnection, files: Sequence[FileInfo]) -> list[FileInfo]:
-    if not files:
-        return []
-
-    con.execute("CREATE TEMP TABLE _stg_scan(file_rel VARCHAR, file_size_bytes UBIGINT, mtime_ns UBIGINT);")
-    con.executemany(
-        "INSERT INTO _stg_scan VALUES (?, ?, ?);",
-        [(f.file_rel, f.file_size_bytes, f.mtime_ns) for f in files],
-    )
-
-    changed = con.execute(
-        """
-        SELECT s.file_rel
-        FROM _stg_scan s
-        LEFT JOIN md.md_file_manifest m ON m.file_rel = s.file_rel
-        WHERE m.file_rel IS NULL
-           OR m.file_size_bytes <> s.file_size_bytes
-           OR m.mtime_ns <> s.mtime_ns
-        """
-    ).fetchall()
-    con.execute("DROP TABLE _stg_scan;")
-
-    want = {r[0] for r in changed}
-    return [f for f in files if f.file_rel in want]
-
-
 def is_first_run(con: duckdb.DuckDBPyConnection, market: str) -> bool:
     n = con.execute("SELECT COUNT(*) FROM md.md_partition_coverage WHERE market = ?;", [market]).fetchone()[0]
     return int(n) == 0
@@ -337,7 +191,6 @@ def bulk_refresh_coverage_first_run(
     else:
         con.execute("DELETE FROM md.md_partition_coverage WHERE market = ? AND timeframe = ?;", [market, timeframe_filter])
 
-
     datasets = list(datasets)
     datasets_sorted = sorted(datasets, key=lambda d: 0 if d not in FUTURES_DATASETS_WITH_TIMEFRAME else 1)
 
@@ -347,6 +200,11 @@ def bulk_refresh_coverage_first_run(
         if ds in FUTURES_DATASETS_WITH_TIMEFRAME:
             glob = dataset_glob(nas_root, market, ds, timeframe=timeframe_filter)
             expected = expected_rows_for_day(timeframe_filter)
+            sample_paths = glob and globlib.glob(glob)
+            if not sample_paths:
+                continue
+            day_key_expr = _day_key_expr_from_parquet(con, sample_paths[0])
+            distinct_ts_col, min_ts_col, max_ts_col = _coverage_ts_cols_from_parquet(con, sample_paths[0])
 
             con.execute(f"""
             INSERT INTO md.md_partition_coverage
@@ -354,13 +212,13 @@ def bulk_refresh_coverage_first_run(
                 '{market}' AS market,
                 '{ds}' AS dataset,
                 symbol,
-                CAST(ts AS DATE) AS date,
+                {day_key_expr} AS date,
                 '{timeframe_filter}'::VARCHAR AS timeframe,
                 COUNT(DISTINCT filename)::UBIGINT AS num_files,
                 COUNT(*)::UBIGINT AS num_rows,
-                COUNT(DISTINCT date_trunc('minute', ts))::UBIGINT AS distinct_minute_cnt,
-                MIN(ts) AS min_ts,
-                MAX(ts) AS max_ts,
+                COUNT(DISTINCT date_trunc('minute', {distinct_ts_col}))::UBIGINT AS distinct_minute_cnt,
+                MIN({min_ts_col}) AS min_ts,
+                MAX({max_ts_col}) AS max_ts,
                 {expected if expected is not None else 'NULL'}::INTEGER AS expected_rows,
                 CASE WHEN {expected if expected is not None else 'NULL'} IS NULL
                     THEN NULL
@@ -373,7 +231,7 @@ def bulk_refresh_coverage_first_run(
                 CAST('{now}' AS TIMESTAMP) AS computed_at_utc
             FROM read_parquet('{glob}', hive_partitioning=1, filename=1)
             WHERE timeframe = '{timeframe_filter}'
-            GROUP BY symbol, CAST(ts AS DATE);
+            GROUP BY symbol, {day_key_expr}, timeframe;
             """)
         else:
             glob = dataset_glob(nas_root, market, ds)
@@ -427,6 +285,14 @@ def incremental_refresh_coverage_for_files(
 
         con.execute("CREATE TEMP TABLE _stg_cov AS SELECT * FROM md.md_partition_coverage WHERE 1=0;")
 
+        day_key_expr = None
+        distinct_ts_col = None
+        min_ts_col = None
+        max_ts_col = None
+        if ds in FUTURES_DATASETS_WITH_TIMEFRAME and paths:
+            day_key_expr = _day_key_expr_from_parquet(con, paths[0])
+            distinct_ts_col, min_ts_col, max_ts_col = _coverage_ts_cols_from_parquet(con, paths[0])
+
         for batch in chunked(paths, chunk_size):
             arr = "[" + ",".join("'" + p.replace("'", "''") + "'" for p in batch) + "]"
 
@@ -440,13 +306,13 @@ def incremental_refresh_coverage_for_files(
                         '{market}' AS market,
                         '{ds}' AS dataset,
                         symbol,
-                        CAST(ts AS DATE),
+                        {day_key_expr} AS date,
                         '{timeframe_filter}'::VARCHAR AS timeframe,
                         COUNT(DISTINCT filename)::UBIGINT AS num_files,
                         COUNT(*)::UBIGINT AS num_rows,
-                        COUNT(DISTINCT date_trunc('minute', ts))::UBIGINT AS distinct_minute_cnt,
-                        MIN(ts) AS min_ts,
-                        MAX(ts) AS max_ts,
+                        COUNT(DISTINCT date_trunc('minute', {distinct_ts_col}))::UBIGINT AS distinct_minute_cnt,
+                        MIN({min_ts_col}) AS min_ts,
+                        MAX({max_ts_col}) AS max_ts,
                         {expected if expected is not None else 'NULL'}::INTEGER AS expected_rows,
                         CASE WHEN {expected if expected is not None else 'NULL'} IS NULL
                             THEN NULL
@@ -459,7 +325,7 @@ def incremental_refresh_coverage_for_files(
                         CAST('{now}' AS TIMESTAMP) AS computed_at_utc
                     FROM read_parquet({arr}, hive_partitioning=1, filename=1)
                     WHERE timeframe = '{timeframe_filter}'
-                    GROUP BY symbol, CAST(ts AS DATE);
+                    GROUP BY symbol, {day_key_expr}, timeframe;
                     """
                 )
 
@@ -520,17 +386,84 @@ def incremental_refresh_coverage_for_files(
         con.execute("DROP TABLE _stg_cov;")
 
 
-def recompute_rollups(con: duckdb.DuckDBPyConnection, market: str, *, timeframe_filter: str) -> None:
+def _sql_list(values: Sequence[str]) -> str:
+    return "(" + ",".join("'" + v.replace("'", "''") + "'" for v in values) + ")"
+
+
+def _resolve_rollup_symbols(
+    con: duckdb.DuckDBPyConnection,
+    market: str,
+    timeframe_filter: str,
+    *,
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date] = None,
+    date_end: Optional[date] = None,
+) -> Optional[list[str]]:
+    if symbols is not None:
+        return sorted(set(symbols))
+    if date_start is None and date_end is None:
+        return None
+
+    date_filter = []
+    if date_start is not None:
+        date_filter.append(f"date >= CAST('{date_start.isoformat()}' AS DATE)")
+    if date_end is not None:
+        date_filter.append(f"date <= CAST('{date_end.isoformat()}' AS DATE)")
+    date_clause = " AND " + " AND ".join(date_filter) if date_filter else ""
+
+    rows = con.execute(
+        f"""
+        SELECT DISTINCT symbol
+        FROM md.md_partition_coverage
+        WHERE market = '{market}'
+          AND (
+                timeframe = '{timeframe_filter}'
+             OR ('{timeframe_filter}' = '1m' AND dataset='funding' AND timeframe = '')
+          ){date_clause}
+        """
+    ).fetchall()
+    resolved = sorted({r[0] for r in rows if r and r[0] is not None})
+    return resolved
+
+
+def recompute_rollups(
+    con: duckdb.DuckDBPyConnection,
+    market: str,
+    *,
+    timeframe_filter: str,
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date] = None,
+    date_end: Optional[date] = None,
+) -> None:
     now = utc_now_iso()
 
-    # Delete only this timeframe's rollups (non-destructive)
-    con.execute(
-        "DELETE FROM md.md_symbol_dataset_stats WHERE market = ? AND timeframe = ?;",
-        [market, timeframe_filter],
+    symbol_list = _resolve_rollup_symbols(
+        con,
+        market,
+        timeframe_filter,
+        symbols=symbols,
+        date_start=date_start,
+        date_end=date_end,
     )
+    symbol_clause = ""
+    if symbol_list is not None:
+        if not symbol_list:
+            return
+        symbol_clause = f" AND symbol IN {_sql_list(symbol_list)}"
 
     # For timeframe_filter == '1m', include funding rows stored with timeframe=''
     # by normalizing them into tf_norm='1m' for rollup purposes.
+    if symbol_list is None:
+        con.execute(
+            "DELETE FROM md.md_symbol_dataset_stats WHERE market = ? AND timeframe = ?;",
+            [market, timeframe_filter],
+        )
+    else:
+        con.execute(
+            f"DELETE FROM md.md_symbol_dataset_stats WHERE market = ? AND timeframe = ?{symbol_clause};",
+            [market, timeframe_filter],
+        )
+
     con.execute(
         f"""
         INSERT INTO md.md_symbol_dataset_stats
@@ -553,7 +486,7 @@ def recompute_rollups(con: duckdb.DuckDBPyConnection, market: str, *, timeframe_
               AND (
                     timeframe = '{timeframe_filter}'
                  OR ('{timeframe_filter}' = '1m' AND dataset='funding' AND timeframe = '')
-              )
+              ){symbol_clause}
         )
         SELECT
             market,
@@ -576,10 +509,25 @@ def recompute_rollups(con: duckdb.DuckDBPyConnection, market: str, *, timeframe_
     )
 
     # Alignment: rebuild only this timeframe (non-destructive)
-    con.execute(
-        "DELETE FROM md.md_alignment_summary WHERE market = ? AND timeframe = ?;",
-        [market, timeframe_filter],
-    )
+    date_filter = ""
+    if date_start is not None:
+        date_filter += f" AND date >= CAST('{date_start.isoformat()}' AS DATE)"
+    if date_end is not None:
+        date_filter += f" AND date <= CAST('{date_end.isoformat()}' AS DATE)"
+
+    if symbol_list is None and not date_filter:
+        con.execute(
+            "DELETE FROM md.md_alignment_summary WHERE market = ? AND timeframe = ?;",
+            [market, timeframe_filter],
+        )
+    else:
+        con.execute(
+            f"""
+            DELETE FROM md.md_alignment_summary
+            WHERE market = ? AND timeframe = ?{symbol_clause}{date_filter};
+            """,
+            [market, timeframe_filter],
+        )
 
     con.execute(
         f"""
@@ -606,7 +554,7 @@ def recompute_rollups(con: duckdb.DuckDBPyConnection, market: str, *, timeframe_
               AND (
                     timeframe = '{timeframe_filter}'
                  OR ('{timeframe_filter}' = '1m' AND dataset='funding' AND timeframe = '')
-              )
+              ){symbol_clause}{date_filter}
             GROUP BY market, tf_norm, symbol, date
         )
         SELECT
@@ -641,17 +589,26 @@ def build_or_update_metadata(
     liquidity_only: bool = False,
     completeness_threshold: float = 0.98,
     incremental_chunk_size: int = 5000,
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date] = None,
+    date_end: Optional[date] = None,
 ) -> dict:
     """
     Future-proofed for /spot by introducing 'market' everywhere, but only processes the chosen market.
 
     Liquidity + rollups are derived from klines; if no relevant klines changes are detected for the
     requested timeframe (and this is not the first run), those recomputations are skipped.
+
+    Optional scan scope:
+      - symbols: allowlist for symbol= partitions
+      - date_start/date_end: UTC date window, applied to date or month partitions
     """
     nas_root = Path(nas_root)
     if meta_db_path is None:
         meta_db_path = default_local_meta_db_path(market)
     meta_db_path = Path(meta_db_path)
+
+    scan_scope = ScanScope(symbols=symbols, date_start=date_start, date_end=date_end)
 
     files = list(
         iter_data_parquets(
@@ -660,9 +617,11 @@ def build_or_update_metadata(
             datasets=datasets,
             timeframe_filter=timeframe_filter,
             datasets_with_timeframe=set(FUTURES_DATASETS_WITH_TIMEFRAME),
+            symbols=scan_scope.symbols,
+            date_start=scan_scope.date_start,
+            date_end=scan_scope.date_end,
         )
     )
-
 
     con = connect_meta_db(meta_db_path)
     try:
@@ -674,7 +633,7 @@ def build_or_update_metadata(
         upsert_manifest(con, files)
 
         if not liquidity_only:
-            if first:
+            if first and not scan_scope.is_scoped:
                 bulk_refresh_coverage_first_run(
                     con,
                     nas_root=nas_root,
@@ -694,11 +653,15 @@ def build_or_update_metadata(
                     timeframe_filter=timeframe_filter,
                     chunk_size=incremental_chunk_size,
                 )
-                mode = "incremental"
+                mode = "scoped_first_run" if first else "incremental"
                 changed_count = len(changed)
         else:
             mode = "liquidity_only"
             changed_count = 0
+
+        sample_klines_files = [
+            f.file_path for f in files if f.dataset == "klines" and f"/timeframe={timeframe_filter}/" in f.file_path
+        ]
 
         liq_summary = build_or_update_liquidity_daily(
             con,
@@ -709,10 +672,46 @@ def build_or_update_metadata(
             top_n=100,
             changed_files=changed,  # pass the same changed files list
             incremental_chunk_size=incremental_chunk_size,
+            scoped=scan_scope.is_scoped,
+            sample_files=sample_klines_files,
         )
 
-        if not liquidity_only and (first or has_relevant_klines_changes):
-            recompute_rollups(con, market=market, timeframe_filter=timeframe_filter)
+        should_recompute_rollups = (first and not scan_scope.is_scoped) or has_relevant_klines_changes
+
+        if not liquidity_only and should_recompute_rollups:
+            recompute_rollups(
+                con,
+                market=market,
+                timeframe_filter=timeframe_filter,
+                symbols=scan_scope.symbols,
+                date_start=scan_scope.date_start,
+                date_end=scan_scope.date_end,
+            )
+            if timeframe_filter == "1m":
+                integrity_summary = build_or_update_kline_integrity_day(
+                    nas_root,
+                    market=market,
+                    meta_db_path=meta_db_path,
+                    timeframe_filter=timeframe_filter,
+                    changed_files=changed,
+                    recompute=False,
+                    incremental_chunk_size=incremental_chunk_size,
+                    con=con,
+                )
+            else:
+                integrity_summary = {
+                    "ok": True,
+                    "market": market,
+                    "timeframe_filter": timeframe_filter,
+                    "mode": "skipped_non_1m_timeframe",
+                }
+        else:
+            integrity_summary = {
+                "ok": True,
+                "market": market,
+                "timeframe_filter": timeframe_filter,
+                "mode": "skipped_liquidity_only",
+            }
 
     finally:
         con.close()
@@ -727,10 +726,9 @@ def build_or_update_metadata(
         "new_or_changed_files": int(changed_count),
         "coverage_mode": mode,
         "when_utc": utc_now_iso(),
-        "liquidity": liq_summary
+        "liquidity": liq_summary,
+        "kline_integrity": integrity_summary,
     }
-
-
 
 
 def _utc_now_ts_expr() -> str:
@@ -743,12 +741,52 @@ def _safe_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _parquet_columns(con: duckdb.DuckDBPyConnection, sample_file: str) -> set[str]:
+    cur = con.execute("SELECT * FROM parquet_schema(?);", [sample_file])
+    rows = cur.fetchall()
+    colnames = [c[0] for c in cur.description]
+    if "name" in colnames:
+        idx = colnames.index("name")
+    elif "column_name" in colnames:
+        idx = colnames.index("column_name")
+    else:
+        raise ValueError(f"Could not find column name field in parquet_schema: columns={colnames}")
+    return {row[idx].lower() for row in rows if row[idx] is not None}
+
+
+def _day_key_expr_from_parquet(con: duckdb.DuckDBPyConnection, sample_file: str) -> str:
+    """
+    Determine the day key expression for a parquet schema.
+    Prefer DATE-typed `date` if present, else CAST(ts AS DATE), else CAST(day AS DATE).
+    """
+    colnames = _parquet_columns(con, sample_file)
+    if "date" in colnames:
+        return "date"
+    if "ts" in colnames:
+        return "CAST(ts AS DATE)"
+    if "day" in colnames:
+        return "CAST(day AS DATE)"
+    raise ValueError(f"Could not infer day key for parquet: columns={sorted(colnames)}")
+
+
+def _coverage_ts_cols_from_parquet(con: duckdb.DuckDBPyConnection, sample_file: str) -> tuple[str, str, str]:
+    colnames = _parquet_columns(con, sample_file)
+    if "ts" in colnames:
+        return "ts", "ts", "ts"
+    min_ts = "min_ts" if "min_ts" in colnames else None
+    max_ts = "max_ts" if "max_ts" in colnames else None
+    distinct_ts = min_ts or max_ts
+    if distinct_ts is None:
+        raise ValueError(f"Could not infer timestamp columns for parquet: columns={sorted(colnames)}")
+    return distinct_ts, (min_ts or distinct_ts), (max_ts or distinct_ts)
+
+
 def _detect_kline_cols(con: duckdb.DuckDBPyConnection, sample_file: str) -> tuple[str, str, str]:
     """
-    Detect (ts_col, close_col, volume_col) from a sample parquet file.
+    Detect (time_col, close_col, volume_col) from a sample parquet file.
     We try a few common variants.
 
-    Returns: (ts_col, close_col, volume_col)
+    Returns: (time_col, close_col, volume_col)
     Raises if it can't find required columns.
     """
     # DuckDB can describe a parquet file as a relation.
@@ -756,26 +794,26 @@ def _detect_kline_cols(con: duckdb.DuckDBPyConnection, sample_file: str) -> tupl
     colnames = {c[0].lower() for c in cols}
 
     # Timestamp column (you've used ts everywhere so far)
-    ts_candidates = ["ts", "timestamp", "time"]
+    ts_candidates = ["ts", "timestamp", "time", "max_ts", "min_ts", "date", "day"]
     close_candidates = ["close", "c"]
     vol_candidates = ["volume", "vol", "qty", "size", "base_volume"]
 
-    ts_col = next((c for c in ts_candidates if c in colnames), None)
+    time_col = next((c for c in ts_candidates if c in colnames), None)
     close_col = next((c for c in close_candidates if c in colnames), None)
     vol_col = next((c for c in vol_candidates if c in colnames), None)
 
-    if ts_col is None:
-        raise ValueError(f"Could not find timestamp column in klines parquet: columns={sorted(colnames)}")
+    if time_col is None:
+        raise ValueError(f"Could not find time column in klines parquet: columns={sorted(colnames)}")
     if close_col is None:
         raise ValueError(f"Could not find close column in klines parquet: columns={sorted(colnames)}")
     if vol_col is None:
         raise ValueError(f"Could not find volume column in klines parquet: columns={sorted(colnames)}")
 
-    return ts_col, close_col, vol_col
+    return time_col, close_col, vol_col
 
 
 def _paths_for_changed_klines(
-    files: Sequence["FileInfo"],  # from your existing dataclass
+    files: Sequence[FileInfo | str],
     timeframe_filter: str,
 ) -> list[str]:
     """
@@ -785,11 +823,231 @@ def _paths_for_changed_klines(
     out = []
     needle = f"/klines/timeframe={timeframe_filter}/"
     for f in files:
-        if f.dataset != "klines":
-            continue
-        if needle in f.file_path.replace("\\", "/"):
-            out.append(f.file_path)
+        if isinstance(f, FileInfo):
+            if f.dataset != "klines":
+                continue
+            path = f.file_path
+        else:
+            path = str(f)
+        if needle in path.replace("\\", "/"):
+            out.append(path)
     return out
+
+
+def _detect_kline_ohlc_cols(
+    con: duckdb.DuckDBPyConnection,
+    sample_file: str,
+) -> tuple[str, str, str, str, str]:
+    cols = con.execute(f"DESCRIBE SELECT * FROM read_parquet('{sample_file}');").fetchall()
+    colnames = {c[0].lower() for c in cols}
+
+    ts_candidates = ["ts", "timestamp", "time"]
+    open_candidates = ["open", "o"]
+    high_candidates = ["high", "h"]
+    low_candidates = ["low", "l"]
+    close_candidates = ["close", "c"]
+
+    time_col = next((c for c in ts_candidates if c in colnames), None)
+    open_col = next((c for c in open_candidates if c in colnames), None)
+    high_col = next((c for c in high_candidates if c in colnames), None)
+    low_col = next((c for c in low_candidates if c in colnames), None)
+    close_col = next((c for c in close_candidates if c in colnames), None)
+
+    if time_col is None:
+        raise ValueError(f"Could not find time column in klines parquet: columns={sorted(colnames)}")
+    if open_col is None or high_col is None or low_col is None or close_col is None:
+        raise ValueError(f"Could not find OHLC columns in klines parquet: columns={sorted(colnames)}")
+
+    return time_col, open_col, high_col, low_col, close_col
+
+
+def build_or_update_kline_integrity_day(
+    nas_root: str | Path,
+    *,
+    market: str = "futures",
+    meta_db_path: Optional[str | Path] = None,
+    timeframe_filter: str = "1m",
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    changed_files: Optional[Sequence[FileInfo | str]] = None,
+    recompute: bool = False,
+    incremental_chunk_size: int = 5000,
+    con: duckdb.DuckDBPyConnection | None = None,
+) -> dict:
+    if timeframe_filter != "1m":
+        raise ValueError("Only timeframe_filter='1m' is supported for kline integrity checks.")
+
+    nas_root = Path(nas_root)
+    if meta_db_path is None and con is None:
+        meta_db_path = default_local_meta_db_path(market)
+
+    expected = expected_rows_for_day(timeframe_filter)
+    changed_paths: list[str] = []
+    if changed_files:
+        changed_paths = _paths_for_changed_klines(changed_files, timeframe_filter=timeframe_filter)
+
+    if not changed_paths and start_date is None and end_date is None and not recompute:
+        return {
+            "ok": True,
+            "market": market,
+            "timeframe_filter": timeframe_filter,
+            "mode": "no_op",
+            "reason": "No changed klines files or date range provided; skipping integrity build.",
+        }
+
+    owns_connection = False
+    if con is None:
+        con = connect_meta_db(Path(meta_db_path))
+        owns_connection = True
+
+    try:
+        if changed_paths:
+            sample_file = changed_paths[0]
+            source_rel = "read_parquet({arr}, hive_partitioning=1, filename=0)"
+        else:
+            glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)
+            sample = con.execute(
+                f"SELECT filename FROM read_parquet('{glob}', filename=1, hive_partitioning=1) LIMIT 1;"
+            ).fetchone()
+            if not sample:
+                return {
+                    "ok": False,
+                    "reason": "No klines parquet files found for sampling",
+                    "market": market,
+                }
+            sample_file = sample[0]
+            source_rel = f"read_parquet('{glob}', hive_partitioning=1, filename=0)"
+
+        time_col, open_col, high_col, low_col, close_col = _detect_kline_ohlc_cols(con, sample_file)
+        day_key_expr = _day_key_expr_from_parquet(con, sample_file)
+
+        con.execute("CREATE TEMP TABLE _stg_kline_integrity AS SELECT * FROM md.md_kline_integrity_day WHERE 1=0;")
+
+        if changed_paths:
+            for i in range(0, len(changed_paths), incremental_chunk_size):
+                batch = changed_paths[i : i + incremental_chunk_size]
+                arr = "[" + ",".join("'" + p.replace("'", "''") + "'" for p in batch) + "]"
+                con.execute(
+                    f"""
+                    INSERT INTO _stg_kline_integrity
+                    WITH base AS (
+                        SELECT
+                            symbol,
+                            {day_key_expr} AS day,
+                            CAST({time_col} AS TIMESTAMP) AS ts,
+                            CAST({open_col} AS DOUBLE) AS open,
+                            CAST({high_col} AS DOUBLE) AS high,
+                            CAST({low_col} AS DOUBLE) AS low,
+                            CAST({close_col} AS DOUBLE) AS close
+                        FROM {source_rel.format(arr=arr)}
+                        WHERE timeframe = '{timeframe_filter}'
+                    ),
+                    calc AS (
+                        SELECT
+                            symbol,
+                            day,
+                            ts,
+                            open,
+                            high,
+                            low,
+                            close,
+                            LAG(close) OVER (PARTITION BY symbol, day ORDER BY ts) AS prev_close
+                        FROM base
+                    )
+                    SELECT
+                        '{market}' AS market,
+                        symbol,
+                        day AS date,
+                        '{timeframe_filter}' AS timeframe,
+                        COUNT(*)::UBIGINT AS num_rows,
+                        COUNT(DISTINCT date_trunc('minute', ts))::UBIGINT AS distinct_minute_cnt,
+                        {expected} - COUNT(DISTINCT date_trunc('minute', ts)) AS gap_rows_vs_expected,
+                        COUNT(*) - COUNT(DISTINCT date_trunc('minute', ts)) AS duplicate_rows,
+                        SUM(CASE WHEN high < low THEN 1 ELSE 0 END)::UBIGINT AS high_lt_low_cnt,
+                        SUM(CASE WHEN open <= 0 OR high <= 0 OR low <= 0 OR close <= 0 THEN 1 ELSE 0 END)::UBIGINT
+                            AS nonpositive_price_cnt,
+                        MAX(ABS(close / prev_close - 1)) AS max_abs_ret_1m,
+                        {_utc_now_ts_expr()} AS computed_at_utc
+                    FROM calc
+                    GROUP BY symbol, day;
+                    """
+                )
+        else:
+            date_filter = ""
+            if start_date:
+                date_filter += f" AND {day_key_expr} >= CAST('{start_date}' AS DATE)"
+            if end_date:
+                date_filter += f" AND {day_key_expr} <= CAST('{end_date}' AS DATE)"
+            con.execute(
+                f"""
+                INSERT INTO _stg_kline_integrity
+                WITH base AS (
+                    SELECT
+                        symbol,
+                        {day_key_expr} AS day,
+                        CAST({time_col} AS TIMESTAMP) AS ts,
+                        CAST({open_col} AS DOUBLE) AS open,
+                        CAST({high_col} AS DOUBLE) AS high,
+                        CAST({low_col} AS DOUBLE) AS low,
+                        CAST({close_col} AS DOUBLE) AS close
+                    FROM {source_rel}
+                    WHERE timeframe = '{timeframe_filter}'{date_filter}
+                ),
+                calc AS (
+                    SELECT
+                        symbol,
+                        day,
+                        ts,
+                        open,
+                        high,
+                        low,
+                        close,
+                        LAG(close) OVER (PARTITION BY symbol, day ORDER BY ts) AS prev_close
+                    FROM base
+                )
+                SELECT
+                    '{market}' AS market,
+                    symbol,
+                    day AS date,
+                    '{timeframe_filter}' AS timeframe,
+                    COUNT(*)::UBIGINT AS num_rows,
+                    COUNT(DISTINCT date_trunc('minute', ts))::UBIGINT AS distinct_minute_cnt,
+                    {expected} - COUNT(DISTINCT date_trunc('minute', ts)) AS gap_rows_vs_expected,
+                    COUNT(*) - COUNT(DISTINCT date_trunc('minute', ts)) AS duplicate_rows,
+                    SUM(CASE WHEN high < low THEN 1 ELSE 0 END)::UBIGINT AS high_lt_low_cnt,
+                    SUM(CASE WHEN open <= 0 OR high <= 0 OR low <= 0 OR close <= 0 THEN 1 ELSE 0 END)::UBIGINT
+                        AS nonpositive_price_cnt,
+                    MAX(ABS(close / prev_close - 1)) AS max_abs_ret_1m,
+                    {_utc_now_ts_expr()} AS computed_at_utc
+                FROM calc
+                GROUP BY symbol, day;
+                """
+            )
+
+        row_count = con.execute("SELECT COUNT(*) FROM _stg_kline_integrity;").fetchone()[0]
+        if row_count:
+            con.execute(
+                """
+                DELETE FROM md.md_kline_integrity_day
+                WHERE market = ?
+                  AND timeframe = ?
+                  AND (symbol, date) IN (SELECT symbol, date FROM _stg_kline_integrity);
+                """,
+                [market, timeframe_filter],
+            )
+            con.execute("INSERT INTO md.md_kline_integrity_day SELECT * FROM _stg_kline_integrity;")
+        con.execute("DROP TABLE _stg_kline_integrity;")
+
+        return {
+            "ok": True,
+            "market": market,
+            "timeframe_filter": timeframe_filter,
+            "mode": "incremental" if changed_paths else "date_range",
+            "rows_inserted": int(row_count),
+        }
+    finally:
+        if owns_connection and con is not None:
+            con.close()
 
 
 def _compute_base_liquidity_from_paths(
@@ -798,7 +1056,8 @@ def _compute_base_liquidity_from_paths(
     paths: Sequence[str],
     *,
     timeframe_filter: str,
-    ts_col: str,
+    time_col: str,
+    day_key_expr: str,
     close_col: str,
     vol_col: str,
     chunk_size: int = 5000,
@@ -807,7 +1066,7 @@ def _compute_base_liquidity_from_paths(
     Compute daily base liquidity metrics for the provided klines parquet file paths and upsert into md.md_liquidity_daily:
       - dollar_volume = sum(close * volume)
       - volume = sum(volume)
-      - close_price = last close by ts
+      - close_price = last close by time column
     """
     if not paths:
         return
@@ -826,11 +1085,11 @@ def _compute_base_liquidity_from_paths(
                 '{market}' AS market,
                 '{timeframe_filter}' AS timeframe,
                 symbol,
-                CAST({ts_col} AS DATE) AS day,
+                {day_key_expr} AS date,
 
                 SUM(CAST({close_col} AS DOUBLE) * CAST({vol_col} AS DOUBLE)) AS dollar_volume,
                 SUM(CAST({vol_col} AS DOUBLE)) AS volume,
-                ARG_MAX(CAST({close_col} AS DOUBLE), CAST({ts_col} AS TIMESTAMP)) AS close_price,
+                ARG_MAX(CAST({close_col} AS DOUBLE), CAST({time_col} AS TIMESTAMP)) AS close_price,
 
                 NULL::DOUBLE AS dv_30d_median,
                 NULL::INTEGER AS liquidity_rank_30d,
@@ -839,7 +1098,7 @@ def _compute_base_liquidity_from_paths(
                 {_utc_now_ts_expr()} AS computed_at_utc
             FROM read_parquet({arr}, hive_partitioning=1, filename=0)
             WHERE timeframe = '{timeframe_filter}'
-            GROUP BY symbol, day;
+            GROUP BY symbol, {day_key_expr};
             """
         )
 
@@ -939,6 +1198,7 @@ def _recompute_rolling_and_rank_for_date_range(
         """
     )
 
+
 def is_first_run_coverage_for_timeframe(con: duckdb.DuckDBPyConnection, market: str, timeframe: str) -> bool:
     if timeframe == "1m":
         # 1m core + funding (timeframe='')
@@ -947,12 +1207,12 @@ def is_first_run_coverage_for_timeframe(con: duckdb.DuckDBPyConnection, market: 
             [market],
         ).fetchone()[0]
         return int(n) == 0
-    else:
-        n = con.execute(
-            "SELECT COUNT(*) FROM md.md_partition_coverage WHERE market = ? AND timeframe = ?;",
-            [market, timeframe],
-        ).fetchone()[0]
-        return int(n) == 0
+    n = con.execute(
+        "SELECT COUNT(*) FROM md.md_partition_coverage WHERE market = ? AND timeframe = ?;",
+        [market, timeframe],
+    ).fetchone()[0]
+    return int(n) == 0
+
 
 def is_first_run_liquidity_for_timeframe(con: duckdb.DuckDBPyConnection, market: str, timeframe: str) -> bool:
     n = con.execute(
@@ -970,8 +1230,10 @@ def build_or_update_liquidity_daily(
     timeframe_filter: str = "1m",
     lookback_days: int = 30,
     top_n: int = 100,
-    changed_files: Optional[Sequence["FileInfo"]] = None,
+    changed_files: Optional[Sequence[FileInfo]] = None,
     incremental_chunk_size: int = 5000,
+    scoped: bool = False,
+    sample_files: Optional[Sequence[str]] = None,
 ) -> dict:
     """
     Build/update md.md_liquidity_daily derived entirely from klines.
@@ -984,24 +1246,31 @@ def build_or_update_liquidity_daily(
     You should pass changed_files from your existing build_or_update_metadata() pipeline to make it truly incremental.
     If changed_files is None, a full recompute is performed (useful for explicit recompute/force flows).
     If changed_files is an empty list, no liquidity recompute is performed.
+    When scoped=True, avoid full rebuilds triggered by first-run detection.
     """
     nas_root = Path(nas_root)
 
-    # Detect columns using one sample file (pick any klines file)
-    sample_glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)
-    sample = con.execute(f"SELECT filename FROM read_parquet('{sample_glob}', filename=1, hive_partitioning=1) LIMIT 1;").fetchone()
-    if not sample:
-        return {"ok": False, "reason": "No klines parquet files found for sampling", "market": market}
-
-    sample_file = sample[0]
-    ts_col, close_col, vol_col = _detect_kline_cols(con, sample_file)
+    # Detect columns using one sample file (prefer scoped files if provided)
+    sample_file = sample_files[0] if sample_files else None
+    if sample_file is None:
+        if scoped:
+            return {"ok": True, "reason": "No scoped klines files available for sampling", "market": market}
+        sample_glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)
+        sample = con.execute(
+            f"SELECT filename FROM read_parquet('{sample_glob}', filename=1, hive_partitioning=1) LIMIT 1;"
+        ).fetchone()
+        if not sample:
+            return {"ok": False, "reason": "No klines parquet files found for sampling", "market": market}
+        sample_file = sample[0]
+    time_col, close_col, vol_col = _detect_kline_cols(con, sample_file)
+    day_key_expr = _day_key_expr_from_parquet(con, sample_file)
 
     # Is this the first run for liquidity?
     first_run = is_first_run_liquidity_for_timeframe(con, market=market, timeframe=timeframe_filter)
 
-    if first_run or changed_files is None:
+    if (first_run or changed_files is None) and not scoped:
         # BULK: compute base liquidity from ALL klines files for timeframe_filter
-        glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter) #(nas_root / market / "klines" / f"timeframe={timeframe_filter}" / "symbol=*" / "date=*" / "data.parquet").as_posix()
+        glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)  # (nas_root / market / "klines" / f"timeframe={timeframe_filter}" / "symbol=*" / "date=*" / "data.parquet").as_posix()
 
         # Replace everything for this market (liquidity-only) — deterministic rebuild
         con.execute("DELETE FROM md.md_liquidity_daily WHERE market = ? AND timeframe = ?;", [market, timeframe_filter])
@@ -1014,11 +1283,11 @@ def build_or_update_liquidity_daily(
                 '{market}' AS market,
                 '{timeframe_filter}' AS timeframe,
                 symbol,
-                CAST({ts_col} AS DATE) AS date,
+                {day_key_expr} AS date,
 
                 SUM(CAST({close_col} AS DOUBLE) * CAST({vol_col} AS DOUBLE)) AS dollar_volume,
                 SUM(CAST({vol_col} AS DOUBLE)) AS volume,
-                ARG_MAX(CAST({close_col} AS DOUBLE), CAST({ts_col} AS TIMESTAMP)) AS close_price,
+                ARG_MAX(CAST({close_col} AS DOUBLE), CAST({time_col} AS TIMESTAMP)) AS close_price,
 
                 NULL::DOUBLE AS dv_30d_median,
                 NULL::INTEGER AS liquidity_rank_30d,
@@ -1027,7 +1296,7 @@ def build_or_update_liquidity_daily(
                 {_utc_now_ts_expr()} AS computed_at_utc
             FROM read_parquet('{glob}', hive_partitioning=1, filename=0)
             WHERE timeframe = '{timeframe_filter}'
-            GROUP BY symbol, CAST({ts_col} AS DATE);
+            GROUP BY symbol, {day_key_expr};
             """
         )
 
@@ -1086,7 +1355,8 @@ def build_or_update_liquidity_daily(
         market,
         changed_paths,
         timeframe_filter=timeframe_filter,
-        ts_col=ts_col,
+        time_col=time_col,
+        day_key_expr=day_key_expr,
         close_col=close_col,
         vol_col=vol_col,
         chunk_size=incremental_chunk_size,
@@ -1099,7 +1369,7 @@ def build_or_update_liquidity_daily(
         f"""
         CREATE TEMP TABLE _chg_dates AS
         SELECT DISTINCT
-        CAST({ts_col} AS DATE) AS date
+        {day_key_expr} AS date
         FROM read_parquet($1, hive_partitioning=1);
         """,
         [changed_paths],
@@ -1115,6 +1385,19 @@ def build_or_update_liquidity_daily(
     max_d = datetime.fromisoformat(dr[1]).date()
     date_from = min_d.isoformat()
     date_to = (max_d + timedelta(days=lookback_days - 1)).isoformat()
+    max_available = con.execute(
+        """
+        SELECT MAX(date)::VARCHAR
+        FROM md.md_liquidity_daily
+        WHERE market = ?
+          AND timeframe = ?;
+        """,
+        [market, timeframe_filter],
+    ).fetchone()
+    if max_available and max_available[0] is not None:
+        max_available_date = datetime.fromisoformat(max_available[0]).date()
+        if max_available_date < datetime.fromisoformat(date_to).date():
+            date_to = max_available_date.isoformat()
 
     _recompute_rolling_and_rank_for_date_range(
         con,
@@ -1137,3 +1420,31 @@ def build_or_update_liquidity_daily(
         "lookback_days": lookback_days,
         "top_n": top_n,
     }
+
+
+def demo_day_key_expr(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    sample_1m: str,
+    sample_1d: str,
+) -> dict[str, str]:
+    """
+    Developer sanity helper: show day key expressions for 1m vs 1d schemas.
+    Runs a tiny coverage-style query for the 1d sample to validate the expression.
+    """
+    expr_1m = _day_key_expr_from_parquet(con, sample_1m)
+    expr_1d = _day_key_expr_from_parquet(con, sample_1d)
+
+    con.execute(
+        f"""
+        SELECT
+            symbol,
+            {expr_1d} AS date
+        FROM read_parquet(?, hive_partitioning=1)
+        GROUP BY symbol, {expr_1d}
+        LIMIT 1;
+        """,
+        [sample_1d],
+    )
+
+    return {"1m": expr_1m, "1d": expr_1d}

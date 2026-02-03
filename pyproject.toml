@@ -39,7 +39,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["kucoin_lake*", "archive*"]
+include = ["kucoin_lake*"]
 
 # ----------------------------------------
 # Ruff (lint + formatter)
@@ -60,7 +60,7 @@ indent-style = "space"
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]
-pythonpath = ["src"]
+pythonpath = ["kucoin_lake"]
 addopts = "-q"
 
 # ----------------------------------------

@@ -30,6 +30,7 @@ dist/
 .vscode/
 *.swp
 *.swo
+*.codex
 
 # ----------------------------------------
 # DuckDB / databases

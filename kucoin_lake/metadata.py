@@ -424,15 +424,17 @@ def _missing_keys_from_coverage(
         f"""
         SELECT c.symbol, c.date
         FROM md.md_partition_coverage c
-        LEFT JOIN {target_table} t
-          ON t.market = c.market
-         AND t.timeframe = c.timeframe
-         AND t.symbol = c.symbol
-         AND t.date = c.date
         WHERE c.market = ?
           AND c.dataset = 'klines'
           AND c.timeframe = ?{scope_clause}
-          AND t.symbol IS NULL
+          AND NOT EXISTS (
+                SELECT 1
+                FROM {target_table} t
+                WHERE t.market = c.market
+                  AND t.timeframe = c.timeframe
+                  AND t.symbol = c.symbol
+                  AND t.date = c.date
+          )
         ORDER BY c.symbol, c.date;
         """,
         [market, timeframe_filter],
@@ -711,6 +713,7 @@ def build_or_update_metadata(
 
         missing_liq_keys: list[tuple[str, date]] = []
         missing_int_keys: list[tuple[str, date]] = []
+        missing_align_keys: list[tuple[str, date]] = []
         if timeframe_filter == "1m":
             missing_liq_keys = _missing_keys_from_coverage(
                 con,
@@ -731,6 +734,16 @@ def build_or_update_metadata(
                     date_start=scan_scope.date_start,
                     date_end=scan_scope.date_end,
                 )
+        if not liquidity_only:
+            missing_align_keys = _missing_keys_from_coverage(
+                con,
+                market=market,
+                timeframe_filter=timeframe_filter,
+                target_table="md.md_alignment_summary",
+                symbols=scan_scope.symbols,
+                date_start=scan_scope.date_start,
+                date_end=scan_scope.date_end,
+            )
 
         sample_klines_files = [
             f.file_path for f in files if f.dataset == "klines" and f"/timeframe={timeframe_filter}/" in f.file_path
@@ -750,7 +763,9 @@ def build_or_update_metadata(
             sample_files=sample_klines_files,
         )
 
-        should_recompute_rollups = (first and not scan_scope.is_scoped) or has_relevant_klines_changes
+        should_recompute_rollups = (
+            (first and not scan_scope.is_scoped) or has_relevant_klines_changes or bool(missing_align_keys)
+        )
 
         if not liquidity_only and should_recompute_rollups:
             recompute_rollups(
@@ -815,6 +830,7 @@ def build_or_update_metadata(
         "new_or_changed_files": int(changed_count),
         "coverage_mode": mode,
         "when_utc": utc_now_iso(),
+        "missing_alignment_keys": int(len(missing_align_keys)),
         "liquidity": liq_summary,
         "kline_integrity": integrity_summary,
     }
@@ -1687,6 +1703,7 @@ def build_or_update_liquidity_daily(
             "market": market,
             "mode": "incremental_no_changed_files",
             "timeframe_filter": timeframe_filter,
+            "missing_keys": 0,
         }
 
     if changed_files is not None and not changed_files and not missing_paths:
@@ -1695,6 +1712,7 @@ def build_or_update_liquidity_daily(
             "market": market,
             "mode": "incremental_no_changed_files",
             "timeframe_filter": timeframe_filter,
+            "missing_keys": 0,
         }
 
     # INCREMENTAL: changed klines paths and/or missing keys
@@ -1707,6 +1725,7 @@ def build_or_update_liquidity_daily(
             "market": market,
             "mode": "incremental_no_klines_changes",
             "timeframe_filter": timeframe_filter,
+            "missing_keys": 0,
         }
 
     sample_file = sample_files[0] if sample_files else None

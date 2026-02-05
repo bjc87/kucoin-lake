@@ -157,6 +157,85 @@ def test_missing_derived_completion_from_coverage(tmp_path: Path) -> None:
 
     assert liq_rows == 2
     assert int_rows == 2
+
+
+def test_alignment_missing_keys_trigger(tmp_path: Path) -> None:
+    lake_root = tmp_path / "lake"
+    meta_db = tmp_path / "meta.duckdb"
+    symbol = "TESTUSDTM"
+    day1 = date(2026, 1, 22)
+    day2 = date(2026, 1, 23)
+
+    _seed_two_days(lake_root, symbol=symbol, day1=day1, day2=day2)
+
+    metadata_module.build_or_update_metadata(
+        lake_root,
+        market="futures",
+        datasets=["klines"],
+        meta_db_path=meta_db,
+        timeframe_filter="1m",
+        symbols=[symbol],
+        date_start=day1,
+        date_end=day2,
+    )
+
+    con = metadata_module.connect_meta_db(meta_db)
+    try:
+        alignment_rows = con.execute(
+            """
+            SELECT COUNT(*)
+            FROM md.md_alignment_summary
+            WHERE market = 'futures' AND timeframe = '1m' AND symbol = ?;
+            """,
+            [symbol],
+        ).fetchone()[0]
+        assert alignment_rows == 2
+        con.execute(
+            """
+            DELETE FROM md.md_alignment_summary
+            WHERE market = 'futures' AND timeframe = '1m' AND symbol = ? AND date = ?;
+            """,
+            [symbol, day2.isoformat()],
+        )
+    finally:
+        con.close()
+
+    result = metadata_module.build_or_update_metadata(
+        lake_root,
+        market="futures",
+        datasets=["klines"],
+        meta_db_path=meta_db,
+        timeframe_filter="1m",
+        symbols=[symbol],
+        date_start=day1,
+        date_end=day2,
+    )
+
+    assert result["new_or_changed_files"] == 0
+
+    con = metadata_module.connect_meta_db(meta_db)
+    try:
+        alignment_rows = con.execute(
+            """
+            SELECT COUNT(*)
+            FROM md.md_alignment_summary
+            WHERE market = 'futures' AND timeframe = '1m' AND symbol = ?;
+            """,
+            [symbol],
+        ).fetchone()[0]
+        day2_rows = con.execute(
+            """
+            SELECT COUNT(*)
+            FROM md.md_alignment_summary
+            WHERE market = 'futures' AND timeframe = '1m' AND symbol = ? AND date = ?;
+            """,
+            [symbol, day2.isoformat()],
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    assert alignment_rows == 2
+    assert day2_rows == 1
     assert day1_liq_ts_after == day1_liq_ts
     assert day1_int_ts_after == day1_int_ts
 

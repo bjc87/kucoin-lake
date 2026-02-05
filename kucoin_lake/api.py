@@ -75,6 +75,48 @@ def build_kline_integrity(
     )
 
 
+def backfill_derived_from_coverage(
+    nas_root: str | Path,
+    *,
+    market: str = "futures",
+    timeframe_filter: str = "1m",
+    meta_db_path: Optional[str | Path] = None,
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date | str] = None,
+    date_end: Optional[date | str] = None,
+    what: Sequence[str] | str = ("liquidity", "integrity"),
+    incremental_chunk_size: int = 5000,
+) -> dict:
+    """
+    Notebook-friendly wrapper for kucoin_lake.metadata.backfill_derived_from_coverage.
+    """
+    if isinstance(date_start, str):
+        date_start = date.fromisoformat(date_start)
+    if isinstance(date_end, str):
+        date_end = date.fromisoformat(date_end)
+
+    if isinstance(what, str):
+        what_norm = what.lower()
+        if what_norm == "both":
+            what = ("liquidity", "integrity")
+        else:
+            what = (what_norm,)
+    else:
+        what = tuple(w.lower() for w in what)
+
+    return metadata_module.backfill_derived_from_coverage(
+        nas_root,
+        market=market,
+        timeframe_filter=timeframe_filter,
+        meta_db_path=meta_db_path,
+        symbols=symbols,
+        date_start=date_start,
+        date_end=date_end,
+        what=what,
+        incremental_chunk_size=incremental_chunk_size,
+    )
+
+
 def resample_1m_to_1d(
     nas_root: str | Path,
     local_staging_dir: Optional[str | Path] = None,

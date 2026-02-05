@@ -100,3 +100,4 @@ tmp/
 .env.*
 *.key
 *.pem
+.ipynb_checkpoints/

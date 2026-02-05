@@ -59,6 +59,34 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     integrity_parser.add_argument("--recompute", action="store_true")
     integrity_parser.add_argument("--incremental-chunk-size", type=int, default=5000)
 
+    backfill_parser = subparsers.add_parser(
+        "backfill-derived",
+        help="Backfill derived liquidity/integrity from coverage without scanning the lake.",
+    )
+    backfill_parser.add_argument("--nas-root", required=True)
+    backfill_parser.add_argument("--meta-db-path", required=True)
+    backfill_parser.add_argument("--market", default="futures")
+    backfill_parser.add_argument("--timeframe", default="1m")
+    backfill_parser.add_argument(
+        "--symbols",
+        help="Comma-separated symbols to scan (e.g. BTCUSDTM,ETHUSDTM).",
+    )
+    backfill_parser.add_argument(
+        "--symbol",
+        dest="symbol",
+        action="append",
+        help="Repeatable symbol filter (may be passed multiple times).",
+    )
+    backfill_parser.add_argument("--date-start", help="YYYY-MM-DD (UTC)")
+    backfill_parser.add_argument("--date-end", help="YYYY-MM-DD (UTC)")
+    backfill_parser.add_argument(
+        "--what",
+        choices=("liquidity", "integrity", "both"),
+        default="both",
+        help="Which derived tables to backfill.",
+    )
+    backfill_parser.add_argument("--incremental-chunk-size", type=int, default=5000)
+
     resample_parser = subparsers.add_parser(
         "resample-1m-to-1d",
         help="Resample 1m bars to 1d bars.",
@@ -218,6 +246,28 @@ def _handle_build_kline_integrity(args: argparse.Namespace) -> dict:
     )
 
 
+def _handle_backfill_derived(args: argparse.Namespace) -> dict:
+    symbols: list[str] = []
+    if args.symbols:
+        symbols.extend([s.strip() for s in args.symbols.split(",") if s.strip()])
+    if args.symbol:
+        symbols.extend([s.strip() for s in args.symbol if s.strip()])
+    symbol_filter = sorted(set(symbols)) if symbols else None
+    date_start = date.fromisoformat(args.date_start) if args.date_start else None
+    date_end = date.fromisoformat(args.date_end) if args.date_end else None
+    return api.backfill_derived_from_coverage(
+        args.nas_root,
+        market=args.market,
+        timeframe_filter=args.timeframe,
+        meta_db_path=args.meta_db_path,
+        symbols=symbol_filter,
+        date_start=date_start,
+        date_end=date_end,
+        what=args.what,
+        incremental_chunk_size=args.incremental_chunk_size,
+    )
+
+
 def _handle_resample(args: argparse.Namespace) -> dict:
     return api.resample_1m_to_1d(
         args.nas_root,
@@ -288,6 +338,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = _handle_build_metadata(args)
     elif args.command == "build-kline-integrity":
         result = _handle_build_kline_integrity(args)
+    elif args.command == "backfill-derived":
+        result = _handle_backfill_derived(args)
     elif args.command == "resample-1m-to-1d":
         result = _handle_resample(args)
     elif args.command == "ingest-local-downloads-to-lake":

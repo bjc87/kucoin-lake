@@ -24,6 +24,7 @@ dev = [
     "ruff>=0.4.0",
     "mypy>=1.8",
     "ipython",
+    "duckdb"
 ]
 
 # Optional: future CLI entrypoint (safe to keep even if cli.py is not ready yet)

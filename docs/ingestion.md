@@ -38,7 +38,37 @@ Examples:
 - funding: `data/futures/daily/fundingRates/BTCUSDTM/BTCUSDTM-fundingRates-2026-01-01.zip`
 
 --------------------------------------------------------------------
-3. MAPPING: ZIP → CANONICAL LAKE PATH
+3. FETCH PLANNING + SUMMARY SEMANTICS
+--------------------------------------------------------------------
+
+`fetch_futures(...)` plans downloads from **remote object listings** (month-sharded prefixes), not by probing every theoretical day key.
+
+Current behavior:
+- Build theoretical requested coverage for each `(symbol, datatype)` in the date window.
+- List remotely available keys for that window by month shard.
+- Filter to in-range keys and skip keys that already exist locally under `{out_root}/data/futures/daily/...`.
+- Download only keys that are both remotely listed and missing locally.
+
+Listing failures:
+- If a month shard listing fails, it is counted as an error for that run.
+- The fetcher does **not** fall back to brute-force per-day GET probes for missing shards.
+
+Summary counters distinguish coverage vs availability vs work:
+- `requested_keys`: theoretical keys in requested date coverage
+- `remote_listed`: keys actually listed remotely in range
+- `missing_remote`: inferred as `requested_keys - remote_listed`
+- `missing_local`: listed keys that are absent locally
+- `planned`: actual download candidates after remote listing + local skip filtering
+- `downloaded`, `skipped_exists`, `errors`: execution outcomes
+
+`planned` is the progress-bar total and represents real download attempts.
+
+Progress display has two stages when enabled:
+- `Planning remote listings` bar: exact shard progress over `(symbol, datatype, month)` listing work (including empty and failed shards).
+- `Downloading KuCoin futures` bar: progress over actual planned downloads only.
+
+--------------------------------------------------------------------
+4. MAPPING: ZIP → CANONICAL LAKE PATH
 --------------------------------------------------------------------
 
 For each ZIP file, ingestion writes exactly one Parquet file in the lake.
@@ -50,7 +80,7 @@ Mapping rules (current behavior):
 - fundingRates ZIP → `funding/symbol={SYMBOL}/date=YYYY-MM-DD/data.parquet`
 
 --------------------------------------------------------------------
-4. SCHEMA NORMALIZATION
+5. SCHEMA NORMALIZATION
 --------------------------------------------------------------------
 
 Ingestion uses DuckDB `read_csv(...)` with explicit column mappings and writes Parquet.
@@ -66,7 +96,7 @@ Dataset-specific expectations:
 - `fundingRates`: `symbol`, `time`, `fundingRate`
 
 --------------------------------------------------------------------
-5. IDEMPOTENCE AND SAFETY RULES
+6. IDEMPOTENCE AND SAFETY RULES
 --------------------------------------------------------------------
 
 Idempotence:
@@ -80,7 +110,7 @@ Safety:
 - Failures are logged to `_logs/nas_parquet_mirror_errors.jsonl`
 
 --------------------------------------------------------------------
-6. REQUIRED DATE BOUNDS
+7. REQUIRED DATE BOUNDS
 --------------------------------------------------------------------
 
 `run_ingest(...)` **requires both** `startdate` and `enddate` (YYYY-MM-DD). Unbounded ingest is intentionally disallowed for repeatability.
@@ -88,7 +118,7 @@ Safety:
 Note: the CLI does not enforce this at argument parsing time, but the ingestion code will raise if either bound is missing.
 
 --------------------------------------------------------------------
-7. DONE-SET MODES
+8. DONE-SET MODES
 --------------------------------------------------------------------
 
 `run_ingest(...)` supports:
@@ -99,7 +129,7 @@ Note: the CLI does not enforce this at argument parsing time, but the ingestion 
 The CLI currently uses the default `scan` mode.
 
 --------------------------------------------------------------------
-8. LOCAL ROOT RESOLUTION
+9. LOCAL ROOT RESOLUTION
 --------------------------------------------------------------------
 
 `resolve_local_download_root(...)` accepts multiple shapes:
@@ -112,7 +142,7 @@ This allows you to pass either:
 - `/Users/you/coding/data/kucoin/data/futures/daily`
 
 --------------------------------------------------------------------
-9. CLI ENTRYPOINTS
+10. CLI ENTRYPOINTS
 --------------------------------------------------------------------
 
 See `docs/cli.md` for exact options. Relevant commands:
@@ -120,7 +150,7 @@ See `docs/cli.md` for exact options. Relevant commands:
 - `kucoin-lake ingest-local-downloads-to-lake`
 
 --------------------------------------------------------------------
-10. CONTRACT VS IMPLEMENTATION DETAIL
+11. CONTRACT VS IMPLEMENTATION DETAIL
 --------------------------------------------------------------------
 
 Contractual:

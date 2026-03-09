@@ -51,6 +51,7 @@ Steps:
 4. Build metadata with `timeframe_filter='1m'`.
 
 Notes:
+- `fetch_futures()` plans from month-sharded remote listings; it downloads only listed keys and skips already local keys.
 - If you also need 1d metadata, run `build_metadata` again with `timeframe_filter='1d'` after resampling.
 - Funding participates only in 1m builds.
 
@@ -68,6 +69,7 @@ Steps:
 
 Key property:
 - Incremental metadata updates are **file-scan driven**; you can scope by symbols and date range to reduce scan time.
+- Fetch planning is listing-driven, so sparse historical windows avoid per-day missing-file probe overhead.
 
 --------------------------------------------------------------------
 4. BACKFILL (HISTORICAL)

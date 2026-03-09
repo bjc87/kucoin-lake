@@ -34,6 +34,7 @@ Key observations:
 - Timeframe is a directory for timeframed datasets.
 - Date is encoded in the filename.
 - Funding uses a different directory pattern (no timeframe directory).
+- Files present locally are only those that were remotely listed and requested; missing days are not probed/downloaded one-by-one.
 
 --------------------------------------------------------------------
 2. MAPPING: LOCAL DOWNLOADS → CANONICAL LAKE

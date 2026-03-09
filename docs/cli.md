@@ -169,6 +169,9 @@ Options:
 Notes:
 - `--datatype` values are validated in the API: `klines`, `mark`, `index`, `funding`, plus the alias `fundingRates` (normalized to `funding`).
 - API requires either `--days` OR both `--start-date` and `--end-date`.
+- Planning is remote-listing-driven (month shards): only remotely listed keys are considered for download, and existing local files are skipped.
+- Summary fields separate requested coverage from remote availability: `requested_keys`, `remote_listed`, `missing_remote`, `missing_local`, `planned`.
+- Progress is two-stage when enabled: listing/planning shard progress first, then download progress for planned files.
 
 --------------------------------------------------------------------
 7. BEHAVIOR NOTES

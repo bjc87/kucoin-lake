@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 import time
+from typing import Callable
 from urllib.parse import urlencode
 from xml.etree import ElementTree as ET
 
@@ -152,18 +153,28 @@ def list_keys_futures(
     start: date,
     end: date,
     timeframe: str = "1m",
+    on_shard_error: Callable[[date, Exception], None] | None = None,
+    on_shard_done: Callable[[date], None] | None = None,
 ) -> list[str]:
     out: list[str] = []
     for d in month_starts(start, end):
-        out.extend(
-            list_month_keys_futures(
-                symbol=symbol,
-                dataset=dataset,
-                year=d.year,
-                month=d.month,
-                timeframe=timeframe,
+        try:
+            out.extend(
+                list_month_keys_futures(
+                    symbol=symbol,
+                    dataset=dataset,
+                    year=d.year,
+                    month=d.month,
+                    timeframe=timeframe,
+                )
             )
-        )
+        except Exception as exc:
+            if on_shard_error is None:
+                raise
+            on_shard_error(d, exc)
+        finally:
+            if on_shard_done is not None:
+                on_shard_done(d)
     # date filter (inclusive)
     filtered: list[str] = []
     for k in set(out):
@@ -310,7 +321,8 @@ def fetch_futures(
     - avoids re-downloading files that already exist under out_root/<bucket-key>
     - normalises XBT* -> BTC* (only at start of symbol string)
     - caps end-date to yesterday (UTC) because daily bundles lag / today's file often missing
-    - progress: one global tqdm bar over total missing-local files
+    - planning is listing-driven: list remote keys first, then download only remote+missing-local
+    - progress: separate listing (planning) and download tqdm bars
     """
     out_root = Path(out_root)
     out_root.mkdir(parents=True, exist_ok=True)
@@ -328,6 +340,7 @@ def fetch_futures(
         raise ValueError(f"Resolved date window is empty: start={start} end={end}")
 
     dates = list(iter_dates(start, end))
+    listing_months = list(month_starts(start, end))
 
     summary: dict = {
         "start": start.isoformat(),
@@ -335,6 +348,8 @@ def fetch_futures(
         "timeframe": timeframe,
         "symbols": len(syms),
         "datatypes": dts,
+        "requested_keys": 0,
+        "remote_listed": 0,
         "planned": 0,
         "missing_local": 0,
         "missing_remote": 0,
@@ -344,21 +359,149 @@ def fetch_futures(
         "per_symbol": [],
     }
 
+    planned_downloads: list[tuple[DataType, str]] = []
+    listing_total_shards = len(syms) * len(dts) * len(listing_months)
+
+    listing_pbar = None
+    if show_progress:
+        listing_pbar = tqdm(
+            total=listing_total_shards,
+            desc="Planning remote listings",
+            unit="shard",
+            leave=True,
+        )
+
+    def _tick_listing(n: int = 1) -> None:
+        if listing_pbar is None:
+            return
+        listing_pbar.update(n)
+        if listing_pbar.n % 25 == 0 or listing_pbar.n == listing_pbar.total:
+            listing_pbar.set_postfix(
+                remote_listed=summary["remote_listed"],
+                errors=summary["errors"],
+            )
+
+    # Plan from remote listings first.
+    for sym in syms:
+        per = {"symbol": sym, "by_type": {}}
+
+        for dt in dts:
+            requested = [key_for_futures_zip(sym, dt, d, timeframe=timeframe) for d in dates]
+            requested_set = set(requested)
+
+            listing_errors = 0
+            shards_done_for_pair = 0
+
+            def _on_shard_error(month_start: date, exc: Exception) -> None:
+                nonlocal listing_errors
+                listing_errors += 1
+                summary["errors"] += 1
+                if verbose:
+                    print(
+                        f"{sym} {dt}: listing failed for {month_start:%Y-%m} "
+                        f"({type(exc).__name__}: {exc})"
+                    )
+                try:
+                    log_error(
+                        {
+                            "dataset": dt,
+                            "symbol": sym,
+                            "month": month_start.strftime("%Y-%m"),
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                except Exception:
+                    pass
+
+            def _on_shard_done(_month_start: date) -> None:
+                nonlocal shards_done_for_pair
+                shards_done_for_pair += 1
+                _tick_listing()
+
+            try:
+                remote_listed_raw = list_keys_futures(
+                    symbol=sym,
+                    dataset=dt,
+                    start=start,
+                    end=end,
+                    timeframe=timeframe,
+                    on_shard_error=_on_shard_error,
+                    on_shard_done=_on_shard_done,
+                )
+            except Exception as exc:
+                summary["errors"] += 1
+                listing_errors += 1
+                remote_listed_raw = []
+                if verbose:
+                    print(f"{sym} {dt}: listing failed ({type(exc).__name__}: {exc})")
+                try:
+                    log_error(
+                        {
+                            "dataset": dt,
+                            "symbol": sym,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
+                except Exception:
+                    pass
+
+            # Keep listing progress exact even if list_keys_futures exits before
+            # invoking shard callbacks (e.g. monkeypatched or unexpected failure).
+            if shards_done_for_pair < len(listing_months):
+                _tick_listing(len(listing_months) - shards_done_for_pair)
+
+            remote_listed = [k for k in remote_listed_raw if k in requested_set]
+            remote_listed.sort()
+
+            existing_local = local_existing_keys(out_root, remote_listed)
+            missing_local = [k for k in remote_listed if k not in existing_local]
+            inferred_missing_remote = len(requested) - len(remote_listed)
+
+            summary["requested_keys"] += len(requested)
+            summary["remote_listed"] += len(remote_listed)
+            summary["planned"] += len(missing_local)
+            summary["missing_local"] += len(missing_local)
+            summary["missing_remote"] += inferred_missing_remote
+            summary["skipped_exists"] += len(existing_local)
+
+            per["by_type"][dt] = {
+                "keys": len(requested),
+                "requested_keys": len(requested),
+                "remote_listed": len(remote_listed),
+                "missing_local": len(missing_local),
+                "planned": len(missing_local),
+                "first": requested[0] if requested else None,
+                "last": requested[-1] if requested else None,
+                "missing_first": missing_local[0] if missing_local else None,
+                "missing_last": missing_local[-1] if missing_local else None,
+            }
+            if listing_errors:
+                per["by_type"][dt]["listing_errors"] = listing_errors
+
+            if verbose:
+                print(
+                    f"{sym} {dt}: requested={len(requested)} "
+                    f"listed={len(remote_listed)} local_missing={len(missing_local)}"
+                )
+
+            planned_downloads.extend((dt, k) for k in missing_local)
+
+        summary["per_symbol"].append(per)
+
+    if listing_pbar is not None:
+        listing_pbar.set_postfix(
+            remote_listed=summary["remote_listed"],
+            errors=summary["errors"],
+        )
+        listing_pbar.close()
+
     # Reuse one session for speed/robustness
     sess = requests.Session()
-
-    # Precompute total missing-local for a single global progress bar
-    total_missing = 0
-    if show_progress and not dry_run:
-        for sym in syms:
-            for dt in dts:
-                keys = [key_for_futures_zip(sym, dt, d, timeframe=timeframe) for d in dates]
-                total_missing += len(missing_keys(out_root, keys))
 
     pbar = None
     if show_progress and not dry_run:
         pbar = tqdm(
-            total=total_missing,
+            total=summary["planned"],
             desc="Downloading KuCoin futures",
             unit="file",
             leave=True,
@@ -376,67 +519,41 @@ def fetch_futures(
                 errors=summary["errors"],
             )
 
-    for sym in syms:
-        per = {"symbol": sym, "by_type": {}}
+    if not dry_run:
+        for dt, k in planned_downloads:
+            try:
+                status = download_key_retry(
+                    k,
+                    out_root,
+                    retries=retries,
+                    backoff_s=backoff_s,
+                    timeout=timeout,
+                    session=sess,
+                )
 
-        for dt in dts:
-            # Generate expected keys directly (no remote listing)
-            keys = [key_for_futures_zip(sym, dt, d, timeframe=timeframe) for d in dates]
-            missing_local = missing_keys(out_root, keys)
-
-            summary["planned"] += len(keys)
-            summary["missing_local"] += len(missing_local)
-
-            per["by_type"][dt] = {
-                "keys": len(keys),
-                "missing_local": len(missing_local),
-                "first": keys[0] if keys else None,
-                "last": keys[-1] if keys else None,
-                "missing_first": missing_local[0] if missing_local else None,
-                "missing_last": missing_local[-1] if missing_local else None,
-            }
-
-            if verbose:
-                print(f"{sym} {dt}: {len(missing_local)}/{len(keys)} missing locally")
-
-            if dry_run:
-                continue
-
-            for k in missing_local:
-                try:
-                    status = download_key_retry(
-                        k,
-                        out_root,
-                        retries=retries,
-                        backoff_s=backoff_s,
-                        timeout=timeout,
-                        session=sess,
-                    )
-
-                    if status == "downloaded":
-                        summary["downloaded"] += 1
-                    elif status == "missing_remote":
-                        summary["missing_remote"] += 1
-                    elif status == "exists":
-                        summary["skipped_exists"] += 1
-                    else:
-                        # e.g. forbidden / client_error_4xx if you added those statuses
-                        summary["errors"] += 1
-
-                except Exception as e:
+                if status == "downloaded":
+                    summary["downloaded"] += 1
+                elif status == "exists":
+                    summary["skipped_exists"] += 1
+                elif status == "missing_remote":
+                    # Listed key disappeared between listing and download.
                     summary["errors"] += 1
-                    # Optional: log for debugging if you have log_error available
-                    try:
-                        log_error({"dataset": dt, "key": k, "error": f"{type(e).__name__}: {e}"})
-                    except Exception:
-                        pass
+                else:
+                    # e.g. forbidden / client_error_4xx
+                    summary["errors"] += 1
 
-                finally:
-                    _tick()
-                    if sleep_s:
-                        time.sleep(sleep_s)
+            except Exception as e:
+                summary["errors"] += 1
+                # Optional: log for debugging if you have log_error available
+                try:
+                    log_error({"dataset": dt, "key": k, "error": f"{type(e).__name__}: {e}"})
+                except Exception:
+                    pass
 
-        summary["per_symbol"].append(per)
+            finally:
+                _tick()
+                if sleep_s:
+                    time.sleep(sleep_s)
 
     if pbar is not None:
         pbar.set_postfix(

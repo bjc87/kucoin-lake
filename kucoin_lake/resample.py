@@ -188,6 +188,7 @@ def plan_resample_tasks(
                 return []
             con = duckdb.connect(":memory:")
             try:
+                con.execute("SET TimeZone = 'UTC';")
                 rows = con.execute(
                     """
                     SELECT DISTINCT symbol, CAST(date AS VARCHAR) AS d
@@ -203,6 +204,7 @@ def plan_resample_tasks(
             glob_pattern = _dataset_root_glob(nas_root, market, dataset, timeframe_src)
             con = duckdb.connect(":memory:")
             try:
+                con.execute("SET TimeZone = 'UTC';")
                 rows = con.execute(
                     f"""
                     SELECT DISTINCT symbol, CAST(date AS VARCHAR) AS d
@@ -452,6 +454,7 @@ def resample_bars(
 
     con = duckdb.connect(":memory:")
     try:
+        con.execute("SET TimeZone = 'UTC';")
         con.execute(f"PRAGMA threads={int(threads)};")
         con.execute("PRAGMA enable_object_cache=true;")
         if memory_limit:

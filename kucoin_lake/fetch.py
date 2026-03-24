@@ -11,6 +11,7 @@ import requests
 from requests import Session
 from tqdm.auto import tqdm
 
+from kucoin_lake.ingest import log_error
 from kucoin_lake.constants import DATASETS, DataType
 from kucoin_lake.paths import (
     date_from_key,
@@ -21,7 +22,6 @@ from kucoin_lake.paths import (
 )
 
 BASE = "https://historical-data.kucoin.com/"
-
 
 # -----------------------------
 # Normalisation + date helpers

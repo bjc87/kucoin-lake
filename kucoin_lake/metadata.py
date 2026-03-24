@@ -166,6 +166,7 @@ def connect_meta_db(db_path: Path) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(db_path.as_posix())
     con.execute("PRAGMA threads=4;")
     con.execute("PRAGMA enable_object_cache=true;")
+    con.execute("SET TimeZone = 'UTC';")
     con.execute(DDL)
     return con
 
@@ -203,7 +204,12 @@ def bulk_refresh_coverage_first_run(
             sample_paths = glob and globlib.glob(glob)
             if not sample_paths:
                 continue
-            day_key_expr = _day_key_expr_from_parquet(con, sample_paths[0])
+            day_key_expr = _metadata_day_key_expr(
+                con,
+                sample_paths[0],
+                dataset=ds,
+                timeframe_filter=timeframe_filter,
+            )
             distinct_ts_col, min_ts_col, max_ts_col = _coverage_ts_cols_from_parquet(con, sample_paths[0])
 
             con.execute(f"""
@@ -235,6 +241,7 @@ def bulk_refresh_coverage_first_run(
             """)
         else:
             glob = dataset_glob(nas_root, market, ds)
+            day_key_expr = "CAST(date AS DATE)" if ds == "funding" else "CAST(ts AS DATE)"
             con.execute(
                 f"""
                 INSERT INTO md.md_partition_coverage
@@ -242,7 +249,7 @@ def bulk_refresh_coverage_first_run(
                     '{market}' AS market,
                     '{ds}' AS dataset,
                     symbol,
-                    CAST(ts AS DATE) AS day,
+                    {day_key_expr} AS day,
                     ''::VARCHAR AS timeframe,
                     COUNT(DISTINCT filename)::UBIGINT AS num_files,
                     COUNT(*)::UBIGINT AS num_rows,
@@ -254,7 +261,7 @@ def bulk_refresh_coverage_first_run(
                     NULL::BOOLEAN AS is_suspect,
                     CAST('{now}' AS TIMESTAMP) AS computed_at_utc
                 FROM read_parquet('{glob}', hive_partitioning=1, filename=1)
-                GROUP BY symbol, day;
+                GROUP BY symbol, {day_key_expr};
                 """
             )
 
@@ -281,7 +288,7 @@ def incremental_refresh_coverage_for_files(
         by_ds.setdefault(f.dataset, []).append(f)
 
     for ds, files in by_ds.items():
-        paths = [f.file_path for f in files]
+        paths = sorted({f.file_path for f in files})
 
         con.execute("CREATE TEMP TABLE _stg_cov AS SELECT * FROM md.md_partition_coverage WHERE 1=0;")
 
@@ -290,7 +297,12 @@ def incremental_refresh_coverage_for_files(
         min_ts_col = None
         max_ts_col = None
         if ds in FUTURES_DATASETS_WITH_TIMEFRAME and paths:
-            day_key_expr = _day_key_expr_from_parquet(con, paths[0])
+            day_key_expr = _metadata_day_key_expr(
+                con,
+                paths[0],
+                dataset=ds,
+                timeframe_filter=timeframe_filter,
+            )
             distinct_ts_col, min_ts_col, max_ts_col = _coverage_ts_cols_from_parquet(con, paths[0])
 
         for batch in chunked(paths, chunk_size):
@@ -330,6 +342,7 @@ def incremental_refresh_coverage_for_files(
                 )
 
             else:
+                day_key_expr = "CAST(date AS DATE)" if ds == "funding" else "CAST(ts AS DATE)"
                 con.execute(
                     f"""
                     INSERT INTO _stg_cov
@@ -337,7 +350,7 @@ def incremental_refresh_coverage_for_files(
                         '{market}' AS market,
                         '{ds}' AS dataset,
                         symbol,
-                        CAST(ts AS DATE),
+                        {day_key_expr},
                         ''::VARCHAR AS timeframe,
                         COUNT(DISTINCT filename)::UBIGINT AS num_files,
                         COUNT(*)::UBIGINT AS num_rows,
@@ -349,14 +362,54 @@ def incremental_refresh_coverage_for_files(
                         NULL::BOOLEAN AS is_suspect,
                         CAST('{now}' AS TIMESTAMP) AS computed_at_utc
                     FROM read_parquet({arr}, hive_partitioning=1, filename=1)
-                    GROUP BY symbol, CAST(ts AS DATE);
+                    GROUP BY symbol, {day_key_expr};
                     """
                 )
 
         con.execute(
-            """
+            f"""
             MERGE INTO md.md_partition_coverage t
-            USING _stg_cov s
+            USING (
+                WITH grouped AS (
+                    SELECT
+                        market,
+                        dataset,
+                        symbol,
+                        date,
+                        timeframe,
+                        SUM(num_files)::UBIGINT AS num_files,
+                        SUM(num_rows)::UBIGINT AS num_rows,
+                        SUM(distinct_minute_cnt)::UBIGINT AS distinct_minute_cnt,
+                        MIN(min_ts) AS min_ts,
+                        MAX(max_ts) AS max_ts,
+                        MAX(expected_rows)::INTEGER AS expected_rows,
+                        MAX(computed_at_utc) AS computed_at_utc
+                    FROM _stg_cov
+                    GROUP BY market, dataset, symbol, date, timeframe
+                )
+                SELECT
+                    market,
+                    dataset,
+                    symbol,
+                    date,
+                    timeframe,
+                    num_files,
+                    num_rows,
+                    distinct_minute_cnt,
+                    min_ts,
+                    max_ts,
+                    expected_rows,
+                    CASE
+                        WHEN expected_rows IS NULL THEN NULL
+                        ELSE num_rows::DOUBLE / expected_rows
+                    END AS completeness_ratio,
+                    CASE
+                        WHEN expected_rows IS NULL THEN NULL
+                        ELSE (num_rows::DOUBLE / expected_rows) < {completeness_threshold}
+                    END AS is_suspect,
+                    computed_at_utc
+                FROM grouped
+            ) s
             ON t.market = s.market
                AND t.dataset = s.dataset
                AND t.symbol = s.symbol
@@ -998,6 +1051,19 @@ def _day_key_expr_from_parquet(con: duckdb.DuckDBPyConnection, sample_file: str)
     raise ValueError(f"Could not infer day key for parquet: columns={sorted(colnames)}")
 
 
+def _metadata_day_key_expr(
+    con: duckdb.DuckDBPyConnection,
+    sample_file: str,
+    *,
+    dataset: str,
+    timeframe_filter: str,
+) -> str:
+    # Raw 1m futures datasets key metadata by hive date partitions.
+    if timeframe_filter == "1m" and dataset in FUTURES_DATASETS_WITH_TIMEFRAME:
+        return "CAST(date AS DATE)"
+    return _day_key_expr_from_parquet(con, sample_file)
+
+
 def _coverage_ts_cols_from_parquet(con: duckdb.DuckDBPyConnection, sample_file: str) -> tuple[str, str, str]:
     colnames = _parquet_columns(con, sample_file)
     if "ts" in colnames:
@@ -1184,7 +1250,12 @@ def build_or_update_kline_integrity_day(
             source_rel = f"read_parquet('{glob}', hive_partitioning=1, filename=0)"
 
         time_col, open_col, high_col, low_col, close_col = _detect_kline_ohlc_cols(con, sample_file)
-        day_key_expr = _day_key_expr_from_parquet(con, sample_file)
+        day_key_expr = _metadata_day_key_expr(
+            con,
+            sample_file,
+            dataset="klines",
+            timeframe_filter=timeframe_filter,
+        )
 
         con.execute("CREATE TEMP TABLE _stg_kline_integrity AS SELECT * FROM md.md_kline_integrity_day WHERE 1=0;")
 
@@ -1633,7 +1704,12 @@ def build_or_update_liquidity_daily(
                 return {"ok": False, "reason": "No klines parquet files found for sampling", "market": market}
             sample_file = sample[0]
         time_col, close_col, vol_col = _detect_kline_cols(con, sample_file)
-        day_key_expr = _day_key_expr_from_parquet(con, sample_file)
+        day_key_expr = _metadata_day_key_expr(
+            con,
+            sample_file,
+            dataset="klines",
+            timeframe_filter=timeframe_filter,
+        )
 
         # BULK: compute base liquidity from ALL klines files for timeframe_filter
         glob = dataset_glob(nas_root, market, "klines", timeframe=timeframe_filter)  # (nas_root / market / "klines" / f"timeframe={timeframe_filter}" / "symbol=*" / "date=*" / "data.parquet").as_posix()
@@ -1740,7 +1816,12 @@ def build_or_update_liquidity_daily(
         return {"ok": False, "reason": "No klines parquet files found for sampling", "market": market}
 
     time_col, close_col, vol_col = _detect_kline_cols(con, sample_file)
-    day_key_expr = _day_key_expr_from_parquet(con, sample_file)
+    day_key_expr = _metadata_day_key_expr(
+        con,
+        sample_file,
+        dataset="klines",
+        timeframe_filter=timeframe_filter,
+    )
 
     paths_for_base = sorted(set(changed_paths + missing_paths))
 

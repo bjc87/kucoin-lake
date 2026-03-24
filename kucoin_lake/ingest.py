@@ -57,6 +57,7 @@ ERRORS_LOG = NAS_ROOT / "_logs" / "nas_parquet_mirror_errors.jsonl"
 class RunCounters:
     total: int = 0
     ok_or_done: int = 0
+    skipped: int = 0
     failed: int = 0
     in_flight: int = 0
     bad_zip: int = 0
@@ -67,7 +68,7 @@ def format_summary(name: str, c: RunCounters) -> str:
     mins = c.elapsed_s / 60.0
     return (
         f"{name}: total={c.total}, ok_or_done={c.ok_or_done}, "
-        f"failed={c.failed}, inflight={c.in_flight}, badzip={c.bad_zip}, "
+        f"skipped={c.skipped}, failed={c.failed}, inflight={c.in_flight}, badzip={c.bad_zip}, "
         f"elapsed={mins:.1f} min"
     )
 
@@ -1133,7 +1134,9 @@ def run_pilot(
     include_funding: bool = True,
 ) -> dict:
     """
-    Runs a small, filtered conversion job intended for validation/pilots.
+    Legacy helper for small, filtered conversion jobs.
+    Prefer run_ingest() for supported ingestion flows.
+
     Returns a stats dict you can print in Jupyter.
     """
     assert local_root.exists(), f"Missing local_root: {local_root}"
@@ -1158,30 +1161,58 @@ def run_pilot(
         "klines_targets": len(klines_zips),
         "funding_targets": len(funding_zips),
         "klines_written_or_done": 0,
+        "klines_skipped": 0,
+        "klines_failed": 0,
         "funding_written_or_done": 0,
+        "funding_skipped": 0,
+        "funding_failed": 0,
     }
 
     con = duckdb.connect()
 
     try:
         for zp in klines_zips:
-            if convert_klines_zip(con, zp, done):
+            status = _normalize_legacy_status(convert_klines_zip(con, zp, done))
+            if status in ("ok", "done"):
                 stats["klines_written_or_done"] += 1
+            elif status == "skip":
+                stats["klines_skipped"] += 1
+            else:
+                stats["klines_failed"] += 1
         for zp in funding_zips:
-            if convert_funding_zip(con, zp, done):
+            status = _normalize_legacy_status(convert_funding_zip(con, zp, done))
+            if status in ("ok", "done"):
                 stats["funding_written_or_done"] += 1
+            elif status == "skip":
+                stats["funding_skipped"] += 1
+            else:
+                stats["funding_failed"] += 1
     finally:
         con.close()
 
     return stats
 
+
+def _normalize_legacy_status(status: object) -> str:
+    if status in ("ok", "done", "skip", "fail"):
+        return str(status)
+    if status is True:
+        return "ok"
+    if status in (False, None):
+        return "fail"
+    return "fail"
+
+
 def run_with_progress(
     label: str,
     zips: list[Path],
-    convert_fn,  # (con, zip_path, done) -> bool
+    convert_fn,  # (con, zip_path, done) -> "ok" | "done" | "skip" | "fail"
     con: duckdb.DuckDBPyConnection,
     done: set[str],
 ) -> RunCounters:
+    """
+    Legacy helper with progress UI. Prefer run_ingest() for supported ingestion flows.
+    """
     counters = RunCounters(total=len(zips))
     start = time.perf_counter()
 
@@ -1191,47 +1222,31 @@ def run_with_progress(
     pbar = tqdm(iterator, desc=label, unit="zip") if use_tqdm else iterator
 
     for zp in pbar:
-        t0 = time.perf_counter()
-
-        # We want to classify "False" returns a bit better.
-        # Your convert_* returns:
-        #   True  = written or already done
-        #   False = skipped in-flight OR failed
-        # We can cheaply detect in-flight here (same logic you already have)
-        if is_in_flight(zp):
-            counters.in_flight += 1
-            # don't log as failure; just skip
-            ok = False
+        status = _normalize_legacy_status(convert_fn(con, zp, done))
+        if status in ("ok", "done"):
+            counters.ok_or_done += 1
+        elif status == "skip":
+            counters.skipped += 1
+            if is_in_flight(zp):
+                counters.in_flight += 1
         else:
-            # zip integrity check classification (optional but useful)
-            ok_zip, reason = zip_is_valid(zp)
+            counters.failed += 1
+            ok_zip, _ = zip_is_valid(zp)
             if not ok_zip:
                 counters.bad_zip += 1
-                log_error({"dataset": label, "zip": zp.as_posix(), "error": reason})
-                ok = False
-            else:
-                ok = convert_fn(con, zp, done)
-
-        if ok:
-            counters.ok_or_done += 1
-        else:
-            # If it wasn't in-flight and wasn't a bad zip, treat as a failure
-            if not is_in_flight(zp) and ok_zip:
-                counters.failed += 1
 
         # update elapsed + ETA
-        dt = time.perf_counter() - t0
         counters.elapsed_s = time.perf_counter() - start
 
         if use_tqdm:
-            processed = counters.ok_or_done + counters.failed + counters.in_flight + counters.bad_zip
-            # throughput based on processed zips (excluding in-flight/badzip still count as processed)
+            processed = counters.ok_or_done + counters.skipped + counters.failed
             rate = processed / max(counters.elapsed_s, 1e-9)
             remaining = counters.total - processed
             eta_s = remaining / max(rate, 1e-9)
 
             pbar.set_postfix({
                 "ok/done": counters.ok_or_done,
+                "skip": counters.skipped,
                 "fail": counters.failed,
                 "inflight": counters.in_flight,
                 "badzip": counters.bad_zip,
@@ -1243,6 +1258,9 @@ def run_with_progress(
 
 
 def run_full(local_root: Path = LOCAL_ROOT, include_klines: bool = True, include_funding: bool = True) -> dict:
+    """
+    Legacy full helper retained for compatibility. Prefer run_ingest() for supported ingestion flows.
+    """
     assert local_root.exists(), f"Missing local_root: {local_root}"
     assert NAS_ROOT.parent.exists(), f"NAS not mounted? Missing: {NAS_ROOT.parent}"
 
@@ -1263,6 +1281,7 @@ def run_full(local_root: Path = LOCAL_ROOT, include_klines: bool = True, include
         "funding": fu.__dict__,
         "errors_log": ERRORS_LOG.as_posix(),
     }
+
 
 def date_str_from_zip_stem(stem: str) -> str:
     # ...-YYYY-MM-DD -> YYYY-MM-DD
@@ -1321,10 +1340,6 @@ def _filter_funding_zips(
         out.append(zp)
     return out
 
-
-# -----------------------------
-# Resolve Dates
-# -----------------------------
 
 def resolvedates_ingest_strict(
     *,
@@ -1393,6 +1408,7 @@ def build_zip_targets_ingest_strict(
     )
 
     return klines_zips, funding_zips, mark_zips, index_zips, start, end
+
 
 # def run_ingest(
 #     *,
@@ -1664,6 +1680,7 @@ def run_ingest(
 
     con = duckdb.connect()
     try:
+        con.execute("SET TimeZone = 'UTC';")
         if include_klines:
             for zp in _iter("klines", klines_zips):
                 status = convert_klines_zip(con, zp, done)

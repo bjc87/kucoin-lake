@@ -44,6 +44,9 @@ Primary workflow:
 Supporting workflows:
 - `build_or_update_kline_integrity_day(...)` (via CLI `build-kline-integrity`)
 - `backfill_derived_from_coverage(...)` (via CLI `backfill-derived`)
+- `validate_metadata(...)` (via API `validate(check='metadata')` and CLI `validate metadata`)
+- `validate_derived_1d(...)` (via API `validate(check='derived-1d')` and CLI `validate derived-1d`)
+- `orchestrate_validation(...)` (via API `validate(check='all')` and CLI `validate all`)
 
 --------------------------------------------------------------------
 2. md_file_manifest
@@ -133,9 +136,20 @@ Supporting workflows:
 9. VALIDATION CHECKLIST
 --------------------------------------------------------------------
 
-After any build:
+Canonical implementation:
+- Package validators (`kucoin_lake.validation`) are the canonical implementation of contract validation.
+- Notebook/ad hoc checks are consumers of validator outputs, not the source of truth.
+
+After any build (phase-2 validation surface):
 - No cross-timeframe row changes (1d build must not touch 1m rows)
 - Funding policy honored (only 1m builds include funding)
 - Rolling windows include lookback pre-history
 - Derived data handled via timestamp-derived dates
 - Idempotence: re-run with no changes yields same counts and values
+
+Current explicit boundaries:
+- Validation is contract-focused and not a research universe builder.
+- Candidate-superset / near-threshold helpers are validation scope selectors, not the research universe implementation.
+
+Reference:
+- `docs/validation.md` is the source-of-truth for validation profiles, checks, artifacts, and CLI/API behavior.

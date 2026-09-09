@@ -6,6 +6,7 @@ from typing import Iterable, Sequence
 
 from kucoin_lake import api
 from kucoin_lake.constants import DEFAULT_FUTURES_DATASETS
+from kucoin_lake.validation.runner import validation_status_to_exit_code
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -199,11 +200,137 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     fetch_parser.add_argument("--verbose", action="store_true")
 
+    validate_parser = subparsers.add_parser(
+        "validate",
+        help="Run validation checks.",
+    )
+    validate_subparsers = validate_parser.add_subparsers(dest="validate_command", required=True)
+
+    validate_metadata_parser = validate_subparsers.add_parser(
+        "metadata",
+        help="Validate metadata reproducibility and invariants.",
+    )
+    validate_metadata_parser.add_argument("--nas-root", required=True)
+    validate_metadata_parser.add_argument("--meta-db-path", required=True)
+    validate_metadata_parser.add_argument("--market", default="futures")
+    validate_metadata_parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=list(DEFAULT_FUTURES_DATASETS),
+        help="Datasets to include (space-separated).",
+    )
+    validate_metadata_parser.add_argument("--timeframe-filter", default="1m")
+    validate_metadata_parser.add_argument(
+        "--symbols",
+        help="Comma-separated symbols to validate (e.g. BTCUSDTM,ETHUSDTM).",
+    )
+    validate_metadata_parser.add_argument(
+        "--symbol",
+        dest="symbol",
+        action="append",
+        help="Repeatable symbol filter (may be passed multiple times).",
+    )
+    validate_metadata_parser.add_argument("--date-start", help="YYYY-MM-DD (UTC)")
+    validate_metadata_parser.add_argument("--date-end", help="YYYY-MM-DD (UTC)")
+    validate_metadata_parser.add_argument("--output-dir")
+    validate_metadata_parser.add_argument(
+        "--profile",
+        choices=("smoke", "full"),
+        default="smoke",
+    )
+    validate_metadata_parser.add_argument("--keep-temp-db", action="store_true")
+
+    validate_derived_parser = validate_subparsers.add_parser(
+        "derived-1d",
+        help="Validate derived 1d datasets against raw 1m inputs.",
+    )
+    validate_derived_parser.add_argument("--nas-root", required=True)
+    validate_derived_parser.add_argument("--market", default="futures")
+    validate_derived_parser.add_argument(
+        "--dataset",
+        choices=("klines", "mark", "index"),
+        required=True,
+    )
+    validate_derived_parser.add_argument(
+        "--symbols",
+        help="Comma-separated symbols to validate (e.g. BTCUSDTM,ETHUSDTM).",
+    )
+    validate_derived_parser.add_argument(
+        "--symbol",
+        dest="symbol",
+        action="append",
+        help="Repeatable symbol filter (may be passed multiple times).",
+    )
+    validate_derived_parser.add_argument("--date-start", help="YYYY-MM-DD (UTC)")
+    validate_derived_parser.add_argument("--date-end", help="YYYY-MM-DD (UTC)")
+    validate_derived_parser.add_argument(
+        "--month",
+        dest="month",
+        action="append",
+        help="Repeatable YYYY-MM month filter.",
+    )
+    validate_derived_parser.add_argument(
+        "--months",
+        help="Comma-separated month filter (e.g. 2025-12,2026-01).",
+    )
+    validate_derived_parser.add_argument("--output-dir")
+    validate_derived_parser.add_argument(
+        "--profile",
+        choices=("smoke", "full"),
+        default="smoke",
+    )
+    validate_derived_parser.add_argument("--sample-limit", type=int)
+
+    validate_all_parser = validate_subparsers.add_parser(
+        "all",
+        help="Run metadata + derived validation orchestration.",
+    )
+    validate_all_parser.add_argument("--nas-root", required=True)
+    validate_all_parser.add_argument("--meta-db-path", required=True)
+    validate_all_parser.add_argument("--market", default="futures")
+    validate_all_parser.add_argument(
+        "--datasets",
+        nargs="+",
+        default=list(DEFAULT_FUTURES_DATASETS),
+        help="Datasets for metadata validation (space-separated).",
+    )
+    validate_all_parser.add_argument(
+        "--derived-datasets",
+        nargs="+",
+        default=["klines", "mark", "index"],
+        help="Derived datasets to validate (space-separated).",
+    )
+    validate_all_parser.add_argument("--timeframe-filter", default="1m")
+    validate_all_parser.add_argument("--candidate-rank-threshold", type=int, default=150)
+    validate_all_parser.add_argument("--append-date-start", help="YYYY-MM-DD (UTC)")
+    validate_all_parser.add_argument("--append-date-end", help="YYYY-MM-DD (UTC)")
+    validate_all_parser.add_argument(
+        "--symbols",
+        help="Comma-separated symbol scope override (e.g. BTCUSDTM,ETHUSDTM).",
+    )
+    validate_all_parser.add_argument(
+        "--symbol",
+        dest="symbol",
+        action="append",
+        help="Repeatable symbol scope override.",
+    )
+    validate_all_parser.add_argument("--output-dir")
+    validate_all_parser.add_argument(
+        "--profile",
+        choices=("smoke", "full"),
+        default="smoke",
+    )
+    validate_all_parser.add_argument("--sample-limit", type=int)
+
     return parser.parse_args(argv)
 
 
-def _print_result(result: dict | None) -> None:
+def _print_result(result: object | None) -> None:
     if result is None:
+        return
+    to_dict = getattr(result, "to_dict", None)
+    if callable(to_dict):
+        print(to_dict())
         return
     print(result)
 
@@ -320,6 +447,80 @@ def _handle_fetch_futures(args: argparse.Namespace) -> dict:
     )
 
 
+def _handle_validate(args: argparse.Namespace):
+    symbols: list[str] = []
+    if getattr(args, "symbols", None):
+        symbols.extend([s.strip() for s in args.symbols.split(",") if s.strip()])
+    if getattr(args, "symbol", None):
+        symbols.extend([s.strip() for s in args.symbol if s.strip()])
+    symbol_filter = sorted(set(symbols)) if symbols else None
+
+    if args.validate_command == "metadata":
+        date_start = date.fromisoformat(args.date_start) if args.date_start else None
+        date_end = date.fromisoformat(args.date_end) if args.date_end else None
+        return api.validate(
+            check="metadata",
+            nas_root=args.nas_root,
+            meta_db_path=args.meta_db_path,
+            market=args.market,
+            datasets=cast_iterable(args.datasets) or DEFAULT_FUTURES_DATASETS,
+            timeframe_filter=args.timeframe_filter,
+            symbols=symbol_filter,
+            date_start=date_start,
+            date_end=date_end,
+            output_dir=args.output_dir,
+            profile=args.profile,
+            keep_temp_db=args.keep_temp_db,
+        )
+
+    if args.validate_command == "derived-1d":
+        months: list[str] = []
+        if args.months:
+            months.extend([m.strip() for m in args.months.split(",") if m.strip()])
+        if args.month:
+            months.extend([m.strip() for m in args.month if m.strip()])
+        month_filter = sorted(set(months)) if months else None
+        date_start = date.fromisoformat(args.date_start) if args.date_start else None
+        date_end = date.fromisoformat(args.date_end) if args.date_end else None
+
+        return api.validate(
+            check="derived-1d",
+            nas_root=args.nas_root,
+            market=args.market,
+            dataset=args.dataset,
+            symbols=symbol_filter,
+            date_start=date_start,
+            date_end=date_end,
+            months=month_filter,
+            output_dir=args.output_dir,
+            profile=args.profile,
+            sample_limit=args.sample_limit,
+        )
+
+    if args.validate_command == "all":
+        append_date_start = date.fromisoformat(args.append_date_start) if args.append_date_start else None
+        append_date_end = date.fromisoformat(args.append_date_end) if args.append_date_end else None
+
+        return api.validate(
+            check="all",
+            nas_root=args.nas_root,
+            meta_db_path=args.meta_db_path,
+            market=args.market,
+            datasets=cast_iterable(args.datasets) or DEFAULT_FUTURES_DATASETS,
+            derived_datasets=cast_sequence(args.derived_datasets) or ["klines", "mark", "index"],
+            timeframe_filter=args.timeframe_filter,
+            candidate_rank_threshold=args.candidate_rank_threshold,
+            append_date_start=append_date_start,
+            append_date_end=append_date_end,
+            symbols=symbol_filter,
+            output_dir=args.output_dir,
+            profile=args.profile,
+            sample_limit=args.sample_limit,
+        )
+
+    raise ValueError(f"Unknown validate command: {args.validate_command}")
+
+
 def cast_iterable(values: Sequence[str] | None) -> Iterable[str] | None:
     if values is None:
         return None
@@ -334,6 +535,7 @@ def cast_sequence(values: Sequence[str] | None) -> Sequence[str] | None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parse_args(argv)
+    exit_code = 0
     if args.command == "build-metadata":
         result = _handle_build_metadata(args)
     elif args.command == "build-kline-integrity":
@@ -346,11 +548,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = _handle_ingest(args)
     elif args.command == "fetch-futures":
         result = _handle_fetch_futures(args)
+    elif args.command == "validate":
+        result = _handle_validate(args)
+        exit_code = validation_status_to_exit_code(result.status)
     else:
         raise ValueError(f"Unknown command: {args.command}")
 
     _print_result(result)
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

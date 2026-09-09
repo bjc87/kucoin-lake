@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
 import glob as globlib
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
@@ -16,22 +15,27 @@ from kucoin_lake.manifest import (
     upsert_manifest,
     utc_now_iso,
 )
+from kucoin_lake.parquet_inspect import (
+    coverage_ts_cols_from_parquet,
+    day_key_expr_from_parquet,
+    detect_kline_cols,
+    detect_kline_ohlc_cols,
+    metadata_day_key_expr,
+    parquet_columns,
+)
 from kucoin_lake.paths import dataset_glob
+from kucoin_lake.scopes import ScanScope
 from kucoin_lake.util import expected_rows_for_day
 
 DEFAULT_META_SUBDIR = "_meta"
 DEFAULT_META_DBNAME = "metadata.duckdb"
 
-
-@dataclass(frozen=True)
-class ScanScope:
-    symbols: Optional[Sequence[str]] = None
-    date_start: Optional[date] = None
-    date_end: Optional[date] = None
-
-    @property
-    def is_scoped(self) -> bool:
-        return bool(self.symbols or self.date_start or self.date_end)
+_parquet_columns = parquet_columns
+_day_key_expr_from_parquet = day_key_expr_from_parquet
+_metadata_day_key_expr = metadata_day_key_expr
+_coverage_ts_cols_from_parquet = coverage_ts_cols_from_parquet
+_detect_kline_cols = detect_kline_cols
+_detect_kline_ohlc_cols = detect_kline_ohlc_cols
 
 
 def default_local_meta_db_path(market: str) -> Path:
@@ -1023,90 +1027,6 @@ def _safe_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _parquet_columns(con: duckdb.DuckDBPyConnection, sample_file: str) -> set[str]:
-    cur = con.execute("SELECT * FROM parquet_schema(?);", [sample_file])
-    rows = cur.fetchall()
-    colnames = [c[0] for c in cur.description]
-    if "name" in colnames:
-        idx = colnames.index("name")
-    elif "column_name" in colnames:
-        idx = colnames.index("column_name")
-    else:
-        raise ValueError(f"Could not find column name field in parquet_schema: columns={colnames}")
-    return {row[idx].lower() for row in rows if row[idx] is not None}
-
-
-def _day_key_expr_from_parquet(con: duckdb.DuckDBPyConnection, sample_file: str) -> str:
-    """
-    Determine the day key expression for a parquet schema.
-    Prefer DATE-typed `date` if present, else CAST(ts AS DATE), else CAST(day AS DATE).
-    """
-    colnames = _parquet_columns(con, sample_file)
-    if "date" in colnames:
-        return "date"
-    if "ts" in colnames:
-        return "CAST(ts AS DATE)"
-    if "day" in colnames:
-        return "CAST(day AS DATE)"
-    raise ValueError(f"Could not infer day key for parquet: columns={sorted(colnames)}")
-
-
-def _metadata_day_key_expr(
-    con: duckdb.DuckDBPyConnection,
-    sample_file: str,
-    *,
-    dataset: str,
-    timeframe_filter: str,
-) -> str:
-    # Raw 1m futures datasets key metadata by hive date partitions.
-    if timeframe_filter == "1m" and dataset in FUTURES_DATASETS_WITH_TIMEFRAME:
-        return "CAST(date AS DATE)"
-    return _day_key_expr_from_parquet(con, sample_file)
-
-
-def _coverage_ts_cols_from_parquet(con: duckdb.DuckDBPyConnection, sample_file: str) -> tuple[str, str, str]:
-    colnames = _parquet_columns(con, sample_file)
-    if "ts" in colnames:
-        return "ts", "ts", "ts"
-    min_ts = "min_ts" if "min_ts" in colnames else None
-    max_ts = "max_ts" if "max_ts" in colnames else None
-    distinct_ts = min_ts or max_ts
-    if distinct_ts is None:
-        raise ValueError(f"Could not infer timestamp columns for parquet: columns={sorted(colnames)}")
-    return distinct_ts, (min_ts or distinct_ts), (max_ts or distinct_ts)
-
-
-def _detect_kline_cols(con: duckdb.DuckDBPyConnection, sample_file: str) -> tuple[str, str, str]:
-    """
-    Detect (time_col, close_col, volume_col) from a sample parquet file.
-    We try a few common variants.
-
-    Returns: (time_col, close_col, volume_col)
-    Raises if it can't find required columns.
-    """
-    # DuckDB can describe a parquet file as a relation.
-    cols = con.execute(f"DESCRIBE SELECT * FROM read_parquet('{sample_file}');").fetchall()
-    colnames = {c[0].lower() for c in cols}
-
-    # Timestamp column (you've used ts everywhere so far)
-    ts_candidates = ["ts", "timestamp", "time", "max_ts", "min_ts", "date", "day"]
-    close_candidates = ["close", "c"]
-    vol_candidates = ["volume", "vol", "qty", "size", "base_volume"]
-
-    time_col = next((c for c in ts_candidates if c in colnames), None)
-    close_col = next((c for c in close_candidates if c in colnames), None)
-    vol_col = next((c for c in vol_candidates if c in colnames), None)
-
-    if time_col is None:
-        raise ValueError(f"Could not find time column in klines parquet: columns={sorted(colnames)}")
-    if close_col is None:
-        raise ValueError(f"Could not find close column in klines parquet: columns={sorted(colnames)}")
-    if vol_col is None:
-        raise ValueError(f"Could not find volume column in klines parquet: columns={sorted(colnames)}")
-
-    return time_col, close_col, vol_col
-
-
 def _paths_for_changed_klines(
     files: Sequence[FileInfo | str],
     timeframe_filter: str,
@@ -1152,33 +1072,6 @@ def _klines_parquet_paths_for_day_keys(
         )
         paths.append(path.as_posix())
     return paths
-
-
-def _detect_kline_ohlc_cols(
-    con: duckdb.DuckDBPyConnection,
-    sample_file: str,
-) -> tuple[str, str, str, str, str]:
-    cols = con.execute(f"DESCRIBE SELECT * FROM read_parquet('{sample_file}');").fetchall()
-    colnames = {c[0].lower() for c in cols}
-
-    ts_candidates = ["ts", "timestamp", "time"]
-    open_candidates = ["open", "o"]
-    high_candidates = ["high", "h"]
-    low_candidates = ["low", "l"]
-    close_candidates = ["close", "c"]
-
-    time_col = next((c for c in ts_candidates if c in colnames), None)
-    open_col = next((c for c in open_candidates if c in colnames), None)
-    high_col = next((c for c in high_candidates if c in colnames), None)
-    low_col = next((c for c in low_candidates if c in colnames), None)
-    close_col = next((c for c in close_candidates if c in colnames), None)
-
-    if time_col is None:
-        raise ValueError(f"Could not find time column in klines parquet: columns={sorted(colnames)}")
-    if open_col is None or high_col is None or low_col is None or close_col is None:
-        raise ValueError(f"Could not find OHLC columns in klines parquet: columns={sorted(colnames)}")
-
-    return time_col, open_col, high_col, low_col, close_col
 
 
 def build_or_update_kline_integrity_day(

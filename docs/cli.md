@@ -174,20 +174,114 @@ Notes:
 - Progress is two-stage when enabled: listing/planning shard progress first, then download progress for planned files.
 
 --------------------------------------------------------------------
-7. BEHAVIOR NOTES
+7. validate metadata
+--------------------------------------------------------------------
+
+**Purpose**: Validate metadata reproducibility and metadata contract invariants.
+
+Required (argparse):
+- `validate metadata --nas-root`
+- `validate metadata --meta-db-path`
+
+Options:
+- `--market` (default: `futures`)
+- `--datasets` (space-separated; default: `klines mark index funding`)
+- `--timeframe-filter` (default: `1m`)
+- `--symbols` (comma-separated symbols)
+- `--symbol` (repeatable symbol filter, may be passed multiple times)
+- `--date-start` (YYYY-MM-DD, UTC)
+- `--date-end` (YYYY-MM-DD, UTC)
+- `--output-dir`
+- `--profile` (`smoke` | `full`, default: `smoke`)
+- `--keep-temp-db`
+
+Notes:
+- `--symbols` and repeated `--symbol` values are merged and de-duplicated in the CLI.
+- `--date-start` and `--date-end` are parsed with `date.fromisoformat(...)` in the CLI.
+- `validate metadata` focuses on metadata reproducibility + metadata invariants.
+
+--------------------------------------------------------------------
+8. validate derived-1d
+--------------------------------------------------------------------
+
+**Purpose**: Validate stored derived `1d` bars against raw `1m` inputs.
+
+Required (argparse):
+- `validate derived-1d --nas-root`
+- `validate derived-1d --dataset` (`klines` | `mark` | `index`)
+
+Options:
+- `--market` (default: `futures`)
+- `--symbols` (comma-separated symbols)
+- `--symbol` (repeatable symbol filter)
+- `--date-start` (YYYY-MM-DD, UTC)
+- `--date-end` (YYYY-MM-DD, UTC)
+- `--month` (repeatable `YYYY-MM`)
+- `--months` (comma-separated `YYYY-MM`)
+- `--output-dir`
+- `--profile` (`smoke` | `full`, default: `smoke`)
+- `--sample-limit` (int)
+
+Notes:
+- `--symbols` and repeated `--symbol` values are merged and de-duplicated in the CLI.
+- `--month` and comma-separated `--months` values are merged and de-duplicated in the CLI.
+- This validator is for `1m -> 1d` checks only (phase-2 scope).
+
+--------------------------------------------------------------------
+9. validate all
+--------------------------------------------------------------------
+
+**Purpose**: Run the operational trust gate (metadata + derived `1d` orchestration).
+
+Required (argparse):
+- `validate all --nas-root`
+- `validate all --meta-db-path`
+
+Options:
+- `--market` (default: `futures`)
+- `--datasets` (space-separated; default: `klines mark index funding`)
+- `--derived-datasets` (space-separated; default: `klines mark index`)
+- `--timeframe-filter` (default: `1m`)
+- `--candidate-rank-threshold` (default: `150`)
+- `--append-date-start` (YYYY-MM-DD, UTC)
+- `--append-date-end` (YYYY-MM-DD, UTC)
+- `--symbols` (comma-separated explicit override)
+- `--symbol` (repeatable explicit override)
+- `--output-dir`
+- `--profile` (`smoke` | `full`, default: `smoke`)
+- `--sample-limit` (int)
+
+Notes:
+- `--symbols`/`--symbol` explicitly override automatic scope selection.
+- Without append bounds, this runs full-history orchestration mode.
+- With both append bounds, this runs append-window mode.
+
+--------------------------------------------------------------------
+10. VALIDATION EXIT CODES
+--------------------------------------------------------------------
+
+Validation commands (`validate metadata`, `validate derived-1d`, `validate all`) use:
+- `0`: `PASS`/`WARN`/`SKIP`
+- `1`: `FAIL`
+- `2`: `ERROR`
+
+--------------------------------------------------------------------
+11. BEHAVIOR NOTES
 --------------------------------------------------------------------
 
 - Symbol filtering: build-metadata/backfill-derived accept `--symbols` (comma-separated) and `--symbol` (repeatable) and merge them; fetch-futures uses a space-separated list for `--symbols`.
-- Date parsing: build-metadata/backfill-derived parse `--date-start/--date-end` with `date.fromisoformat(...)`; build-kline-integrity passes `--start-date/--end-date` through as strings.
+- Date parsing: build-metadata/backfill-derived/validate metadata/validate derived-1d parse `--date-start/--date-end` with `date.fromisoformat(...)`; `validate all` parses append bounds via `--append-date-start/--append-date-end`; build-kline-integrity passes `--start-date/--end-date` through as strings.
 
 --------------------------------------------------------------------
-8. OUTPUT
+12. OUTPUT
 --------------------------------------------------------------------
 
-All CLI commands return a dict from the underlying API and print it to stdout (no output is printed if the result is `None`).
+Most CLI commands return a dict from the underlying API and print it to stdout.
+Validation commands return a `ValidationRunResult` and the CLI prints `ValidationRunResult.to_dict()`.
+No output is printed if the result is `None`.
 
 --------------------------------------------------------------------
-9. EXAMPLES
+13. EXAMPLES
 --------------------------------------------------------------------
 
 End-to-end (fetch -> ingest -> metadata):
@@ -212,6 +306,46 @@ kucoin-lake build-metadata \
   --market futures \
   --datasets klines mark index funding \
   --timeframe-filter 1m
+
+kucoin-lake validate metadata \
+  --nas-root /Volumes/quant_data/kucoin \
+  --meta-db-path /Users/you/coding/data/kucoin/_meta/metadata_futures.duckdb \
+  --market futures \
+  --datasets klines mark index funding \
+  --timeframe-filter 1m \
+  --profile smoke
+```
+
+Derived validation (single dataset):
+```bash
+kucoin-lake validate derived-1d \
+  --nas-root /Volumes/quant_data/kucoin \
+  --market futures \
+  --dataset klines \
+  --profile smoke
+```
+
+Full trust gate:
+```bash
+kucoin-lake validate all \
+  --nas-root /Volumes/quant_data/kucoin \
+  --meta-db-path /Users/you/coding/data/kucoin/_meta/metadata_futures.duckdb \
+  --market futures \
+  --datasets klines mark index funding \
+  --derived-datasets klines mark index \
+  --candidate-rank-threshold 150 \
+  --profile smoke
+```
+
+Daily append trust gate:
+```bash
+kucoin-lake validate all \
+  --nas-root /Volumes/quant_data/kucoin \
+  --meta-db-path /Users/you/coding/data/kucoin/_meta/metadata_futures.duckdb \
+  --append-date-start 2026-03-31 \
+  --append-date-end 2026-03-31 \
+  --candidate-rank-threshold 150 \
+  --profile full
 ```
 
 Resample (safe plan first):

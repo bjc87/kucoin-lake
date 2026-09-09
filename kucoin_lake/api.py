@@ -4,11 +4,15 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
-from kucoin_lake import ingest as mirror_module
 from kucoin_lake import fetch as fetch_module
+from kucoin_lake import ingest as mirror_module
 from kucoin_lake import metadata as metadata_module
 from kucoin_lake import resample as resample_module
 from kucoin_lake.constants import DEFAULT_FUTURES_DATASETS
+from kucoin_lake.validation.derived import validate_derived_1d
+from kucoin_lake.validation.metadata import validate_metadata
+from kucoin_lake.validation.models import ValidationRunResult
+from kucoin_lake.validation.orchestrator import DEFAULT_DERIVED_DATASETS, orchestrate_validation
 
 
 def build_metadata(
@@ -44,6 +48,133 @@ def build_metadata(
         symbols=symbols,
         date_start=date_start,
         date_end=date_end,
+    )
+
+
+def validate(
+    *,
+    check: str = "metadata",
+    nas_root: str | Path,
+    meta_db_path: str | Path | None = None,
+    market: str = "futures",
+    datasets: Iterable[str] = DEFAULT_FUTURES_DATASETS,
+    dataset: str = "klines",
+    derived_datasets: Sequence[str] = DEFAULT_DERIVED_DATASETS,
+    timeframe_filter: str = "1m",
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date | str] = None,
+    date_end: Optional[date | str] = None,
+    months: Optional[Sequence[str]] = None,
+    candidate_rank_threshold: int = 150,
+    append_date_start: Optional[date | str] = None,
+    append_date_end: Optional[date | str] = None,
+    output_dir: Optional[str | Path] = None,
+    profile: str = "smoke",
+    sample_limit: Optional[int] = None,
+    keep_temp_db: bool = False,
+) -> ValidationRunResult:
+    if isinstance(date_start, str):
+        date_start = date.fromisoformat(date_start)
+    if isinstance(date_end, str):
+        date_end = date.fromisoformat(date_end)
+    if isinstance(append_date_start, str):
+        append_date_start = date.fromisoformat(append_date_start)
+    if isinstance(append_date_end, str):
+        append_date_end = date.fromisoformat(append_date_end)
+
+    if check == "metadata":
+        if meta_db_path is None:
+            raise ValueError("meta_db_path is required for check='metadata'")
+        return validate_metadata(
+            nas_root,
+            meta_db_path=meta_db_path,
+            market=market,
+            datasets=datasets,
+            timeframe_filter=timeframe_filter,
+            symbols=symbols,
+            date_start=date_start,
+            date_end=date_end,
+            output_dir=output_dir,
+            profile=profile,
+            keep_temp_db=keep_temp_db,
+        )
+
+    if check == "derived-1d":
+        return validate_derived_1d(
+            nas_root,
+            market=market,
+            dataset=dataset,
+            symbols=symbols,
+            date_start=date_start,
+            date_end=date_end,
+            months=months,
+            output_dir=output_dir,
+            profile=profile,
+            sample_limit=sample_limit,
+        )
+
+    if check == "all":
+        if meta_db_path is None:
+            raise ValueError("meta_db_path is required for check='all'")
+        return orchestrate_validation(
+            nas_root,
+            meta_db_path=meta_db_path,
+            market=market,
+            datasets=datasets,
+            derived_datasets=derived_datasets,
+            timeframe_filter=timeframe_filter,
+            symbols=symbols,
+            date_start=date_start,
+            date_end=date_end,
+            append_date_start=append_date_start,
+            append_date_end=append_date_end,
+            candidate_rank_threshold=candidate_rank_threshold,
+            output_dir=output_dir,
+            profile=profile,
+            sample_limit=sample_limit,
+            keep_temp_db=keep_temp_db,
+        )
+
+    raise ValueError("validate() supports check='metadata' | 'derived-1d' | 'all'")
+
+
+def validate_all(
+    *,
+    nas_root: str | Path,
+    meta_db_path: str | Path,
+    market: str = "futures",
+    datasets: Iterable[str] = DEFAULT_FUTURES_DATASETS,
+    derived_datasets: Sequence[str] = DEFAULT_DERIVED_DATASETS,
+    timeframe_filter: str = "1m",
+    symbols: Optional[Sequence[str]] = None,
+    date_start: Optional[date | str] = None,
+    date_end: Optional[date | str] = None,
+    append_date_start: Optional[date | str] = None,
+    append_date_end: Optional[date | str] = None,
+    candidate_rank_threshold: int = 150,
+    output_dir: Optional[str | Path] = None,
+    profile: str = "smoke",
+    sample_limit: Optional[int] = None,
+    keep_temp_db: bool = False,
+) -> ValidationRunResult:
+    return validate(
+        check="all",
+        nas_root=nas_root,
+        meta_db_path=meta_db_path,
+        market=market,
+        datasets=datasets,
+        derived_datasets=derived_datasets,
+        timeframe_filter=timeframe_filter,
+        symbols=symbols,
+        date_start=date_start,
+        date_end=date_end,
+        append_date_start=append_date_start,
+        append_date_end=append_date_end,
+        candidate_rank_threshold=candidate_rank_threshold,
+        output_dir=output_dir,
+        profile=profile,
+        sample_limit=sample_limit,
+        keep_temp_db=keep_temp_db,
     )
 
 

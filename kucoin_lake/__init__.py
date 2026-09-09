@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 __all__ = [
     "build_metadata",
+    "validate",
+    "validate_all",
     "build_kline_integrity",
     "backfill_derived_from_coverage",
     "resample_1m_to_1d",
@@ -15,12 +17,14 @@ __all__ = [
 
 if TYPE_CHECKING:
     from .api import (
-        build_metadata,
-        build_kline_integrity,
         backfill_derived_from_coverage,
+        build_kline_integrity,
+        build_metadata,
         fetch_futures,
         ingest_local_downloads_to_lake,
         resample_1m_to_1d,
+        validate,
+        validate_all,
     )
 
 

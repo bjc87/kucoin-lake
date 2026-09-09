@@ -15,6 +15,7 @@ fetch_futures()
 ingest_local_downloads_to_lake()
 resample_1m_to_1d()
 build_metadata()
+validate(check="all")
 ```
 Resampling is executed **per dataset** (`klines`, `mark`, `index`) as needed.
 
@@ -25,7 +26,8 @@ Resampling is executed **per dataset** (`klines`, `mark`, `index`) as needed.
 - `docs/ingestion.md` — Fetch + ingest behavior and invariants
 - `docs/local_download_layout.md` — Raw download layout (input adapter only)
 - `docs/metadata_contracts.md` — Metadata tables and semantics
-- `docs/runbooks.md` — First run, daily update, backfill, gap-fill
+- `docs/validation.md` — Phase-2 validation surface, trust gates, checks, and artifacts
+- `docs/runbooks.md` — Operational trust-gate runbooks (full-history and daily append)
 - `docs/decisions.md` — Rationale for design choices
 
 **Fixture Reference**

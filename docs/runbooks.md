@@ -1,151 +1,136 @@
 # KuCoin Lake — Runbooks
 
-Operational guidance for ingestion, resampling, and metadata workflows.
+Operational guidance for ingestion, resampling, metadata build, and phase-2 trust gates.
 
 Design priorities:
 - research correctness > micro-optimisation
 - idempotent, resumable operations
-- multi-timeframe safety
 - explicit scope (symbol/date/dataset/timeframe)
+- package-owned validation as the trust gate
 
 --------------------------------------------------------------------
-0. ONE OPERATIONAL FLOW (SCOPE VARIES)
+0. ONE PIPELINE, TWO TRUST GATES
 --------------------------------------------------------------------
 
-All run types use the **same pipeline steps**. Only scope changes.
-
-Pipeline steps:
-1. `fetch_futures()` (optional, if ZIPs not already local)
+Base data pipeline:
+1. `fetch_futures()` (optional if ZIPs already local)
 2. `ingest_local_downloads_to_lake()`
-3. `resample_1m_to_1d()` (per dataset, if 1d is needed)
+3. `resample_1m_to_1d()` (per dataset, when `1d` outputs are required)
 4. `build_metadata()`
 
-Run types:
-- **First run**: full scope (all symbols, full history)
-- **Daily update**: last N days + changed files
-- **Backfill**: bounded symbol/date/dataset/timeframe window
-- **Gap fill**: targeted symbol-day from metadata gaps
+Validation trust gates:
+- full-history trust gate: `kucoin-lake validate all` (no append bounds)
+- daily append trust gate: `kucoin-lake validate all --append-date-start ... --append-date-end ...`
+
+Use `validate metadata` and `validate derived-1d` for targeted diagnosis, but use `validate all` as the operational gate.
 
 --------------------------------------------------------------------
-1. CANONICAL JUPYTER API SEQUENCE
+1. BEFORE STARTING RESEARCH (FULL-HISTORY TRUST GATE)
 --------------------------------------------------------------------
 
-Recommended sequence (per dataset resample if needed):
-```
-fetch_futures()
-ingest_local_downloads_to_lake()
-resample_1m_to_1d()
-build_metadata()
-```
+Run this once before kicking off a full research refresh.
 
---------------------------------------------------------------------
-2. FIRST RUN
---------------------------------------------------------------------
-
-**Goal**: initialize lake + metadata for 1m futures.
-
-Steps:
-1. Fetch ZIPs for the full desired range.
-2. Ingest ZIPs into the NAS lake.
-3. (Optional) Resample 1m → 1d per dataset.
-4. Build metadata with `timeframe_filter='1m'`.
-
-Notes:
-- `fetch_futures()` plans from month-sharded remote listings; it downloads only listed keys and skips already local keys.
-- If you also need 1d metadata, run `build_metadata` again with `timeframe_filter='1d'` after resampling.
-- Funding participates only in 1m builds.
-
---------------------------------------------------------------------
-3. DAILY UPDATE
---------------------------------------------------------------------
-
-**Goal**: keep lake + metadata current with minimal work.
-
-Steps:
-1. Fetch last N days of ZIPs.
-2. Ingest bounded date window (typically last N days).
-3. Resample affected months per dataset (use `changed_files` or month filters).
-4. Run `build_metadata` with `timeframe_filter='1m'` (and `1d` if needed).
-
-Key property:
-- Incremental metadata updates are **file-scan driven**; you can scope by symbols and date range to reduce scan time.
-- Fetch planning is listing-driven, so sparse historical windows avoid per-day missing-file probe overhead.
-
---------------------------------------------------------------------
-4. BACKFILL (HISTORICAL)
---------------------------------------------------------------------
-
-**Goal**: backfill a bounded history for specific symbols or datasets.
-
-Steps:
-1. Fetch ZIPs for the backfill date range.
-2. Ingest the same bounded date range.
-3. Resample 1d for the backfilled range (per dataset).
-4. Run `build_metadata` with a matching scope:
-   - `--symbols` and `--date-start/--date-end`
-   - `--timeframe-filter` set to the target timeframe
-
---------------------------------------------------------------------
-5. GAP FILL (MISSING DAYS)
---------------------------------------------------------------------
-
-**Goal**: fill missing derived tables using coverage as the driver.
-
-Steps:
-1. Ensure `md_partition_coverage` is up to date (via `build_metadata`).
-2. Use `backfill-derived` to rebuild missing liquidity/integrity rows **without rescanning the lake**.
-
---------------------------------------------------------------------
-6. CLI TEMPLATES
---------------------------------------------------------------------
-
-Templates use placeholders; see `docs/cli.md` for exact options.
-
-Fetch:
-```
-kucoin-lake fetch-futures \
-  --out-root <path-to-download-root> \
-  --symbols <SYM1> <SYM2> \
-  --datatype klines mark index funding \
-  --timeframe 1m \
-  --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-```
-
-Ingest:
-```
-kucoin-lake ingest-local-downloads-to-lake \
-  --startdate YYYY-MM-DD \
-  --enddate YYYY-MM-DD \
-  --assets <SYM1> <SYM2> \
-  --timeframes 1m \
-  --local-root <path-containing-futures/daily-or-datasets>
-```
-
-Resample (per dataset):
-```
-kucoin-lake resample-1m-to-1d \
-  --nas-root <path-to-lake-root> \
-  --market futures \
-  --dataset klines \
-  --threads 4
-```
-
-Metadata build:
-```
-kucoin-lake build-metadata \
-  --nas-root <path-to-lake-root> \
-  --meta-db-path <path-to-metadata.duckdb> \
+1. Ensure full ingest/resample/metadata build is complete.
+2. Run full trust gate:
+```bash
+kucoin-lake validate all \
+  --nas-root <lake_root> \
+  --meta-db-path <metadata.duckdb> \
   --market futures \
   --datasets klines mark index funding \
-  --timeframe-filter 1m
+  --derived-datasets klines mark index \
+  --candidate-rank-threshold 150 \
+  --profile full
+```
+Scope behavior:
+- if `--symbols`/`--symbol` are provided, those symbols are used
+- otherwise derived validation symbols come from candidate-superset selection (`md.md_liquidity_daily`, `liquidity_rank_30d <= candidate_rank_threshold`)
+
+3. Inspect top-level outputs:
+   - `<output_dir>/run_summary.json`
+   - `<output_dir>/checks.jsonl`
+   - `<output_dir>/child_runs.json`
+4. If needed, inspect child outputs:
+   - `<output_dir>/metadata/...`
+   - `<output_dir>/derived_1d_klines/...`
+   - `<output_dir>/derived_1d_mark/...`
+   - `<output_dir>/derived_1d_index/...`
+
+Blocker policy:
+- `FAIL` or `ERROR` in overall `validate all` blocks research refresh.
+- Fix and rerun gate before refresh.
+
+--------------------------------------------------------------------
+2. DAILY AFTER NEW DATA ARRIVES (APPEND TRUST GATE)
+--------------------------------------------------------------------
+
+Run this after daily ingest/resample/metadata updates.
+
+1. Build/refresh the day’s data (`ingest -> resample -> metadata`).
+2. Run append-window trust gate:
+```bash
+kucoin-lake validate all \
+  --nas-root <lake_root> \
+  --meta-db-path <metadata.duckdb> \
+  --append-date-start YYYY-MM-DD \
+  --append-date-end YYYY-MM-DD \
+  --candidate-rank-threshold 150 \
+  --profile smoke
+```
+3. If append gate fails, rerun with `--profile full` for row-level artifacts.
+
+Append mode behavior implemented today:
+- metadata validator runs in `smoke` mode
+- derived symbol scope uses near-threshold selection unless explicit symbols are provided
+- near-threshold selection is based on recent `md.md_liquidity_daily` ranks around the target cutoff (`100`) using a band derived from `candidate_rank_threshold`
+
+Blocker policy:
+- `FAIL` or `ERROR` blocks daily research refresh.
+
+--------------------------------------------------------------------
+3. WHEN TO RUN TARGETED VALIDATORS
+--------------------------------------------------------------------
+
+Use targeted validators when diagnosing failures or validating one component:
+
+Metadata only:
+```bash
+kucoin-lake validate metadata \
+  --nas-root <lake_root> \
+  --meta-db-path <metadata.duckdb> \
+  --profile full
 ```
 
+Derived only (single dataset):
+```bash
+kucoin-lake validate derived-1d \
+  --nas-root <lake_root> \
+  --dataset klines \
+  --profile full
+```
+
+Typical reasons:
+- isolate whether failure is metadata vs derived bars
+- focus on one dataset or symbol subset
+- collect row-level mismatch artifacts quickly
+
 --------------------------------------------------------------------
-7. COMMON PITFALLS
+4. FAILURE TRIAGE (PRACTICAL)
 --------------------------------------------------------------------
 
-- Cross-timeframe deletes (always scope by timeframe)
-- Funding leakage into non-1m builds
-- Assuming hive `date` for derived 1d (must use timestamps)
-- Rolling window recompute without lookback pre-history
-- Concurrent writers against the same DuckDB file
+If `validate all` fails:
+1. Check top-level child statuses in `run_summary.json`.
+2. Open failing child `run_summary.json` and `checks.jsonl`.
+3. For `full` profile, inspect per-check artifacts under `artifacts/<check_id>/`.
+
+Common outcomes:
+- metadata child fail: metadata contracts or reproducibility mismatch
+- derived child fail: `1d` output differs from `1m` aggregation, missing rows, extra rows, or key/partition issues
+
+--------------------------------------------------------------------
+5. BOUNDARIES (DO NOT CONFUSE RESPONSIBILITIES)
+--------------------------------------------------------------------
+
+- Validation is contract-focused.
+- Candidate superset and near-threshold selection are validation scope helpers.
+- Research universe construction is separate and not implemented by validation commands.

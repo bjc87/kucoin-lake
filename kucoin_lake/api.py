@@ -288,6 +288,9 @@ def resample_1m_to_1d(
 
 def ingest_local_downloads_to_lake(
     *,
+    local_root: str | Path,
+    nas_root: str | Path,
+    local_staging_dir: str | Path,
     startdate: str | None = None,
     enddate: str | None = None,
     assets: Iterable[str] | None = None,
@@ -297,14 +300,13 @@ def ingest_local_downloads_to_lake(
     include_mark: bool = True,
     include_index: bool = True,
     done_set_mode: str = "scan",
-    local_root: Optional[str | Path] = None,
     verbose: bool = False,
 ) -> dict:
-    """
-    Notebook-friendly wrapper for archive.nas_parquet_mirror.run_ingest.
-    """
-    root = Path(local_root) if local_root is not None else mirror_module.LOCAL_ROOT
+    """Ingest bounded local KuCoin downloads into an explicitly configured lake."""
     return mirror_module.run_ingest(
+        local_root=Path(local_root),
+        nas_root=Path(nas_root),
+        local_stage_root=Path(local_staging_dir),
         startdate=startdate,
         enddate=enddate,
         assets=assets,
@@ -314,7 +316,6 @@ def ingest_local_downloads_to_lake(
         include_mark=include_mark,
         include_index=include_index,
         done_set_mode=done_set_mode,
-        local_root=root,
         show_progress=verbose,
         verbose=verbose,
     )

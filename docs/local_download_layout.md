@@ -63,8 +63,8 @@ Mapping rules:
 - a parent that contains `futures/daily/`
 
 This allows you to pass either:
-- `/Users/you/coding/data/kucoin/data`
-- `/Users/you/coding/data/kucoin/data/futures/daily`
+- `/path/to/downloads/data`
+- `/path/to/downloads/data/futures/daily`
 
 --------------------------------------------------------------------
 4. INPUT ADAPTER BOUNDARY

@@ -14,7 +14,7 @@ The ingestion pipeline has two stages:
 
 2) **Convert ZIP → Parquet**
    - Implemented in `kucoin_lake.ingest.run_ingest(...)`
-   - Parses CSVs, normalizes schemas, writes Parquet to the NAS lake
+   - Parses CSVs, normalizes schemas, and writes Parquet to the supplied lake root
    - Uses local staging + atomic copy to avoid partial writes
 
 The canonical output contract is the lake layout in `docs/data_lake_layout.md`.
@@ -106,7 +106,7 @@ Idempotence:
 Safety:
 - In-flight ZIPs are skipped (recently modified or `.part/.tmp/.download`)
 - ZIPs are validated via `zipfile.ZipFile(...).testzip()`
-- Parquet writes use local staging then atomic copy to NAS
+- Parquet writes use the supplied local staging directory, then an atomic copy to the lake
 - Failures are logged to `_logs/nas_parquet_mirror_errors.jsonl`
 
 --------------------------------------------------------------------
@@ -115,14 +115,14 @@ Safety:
 
 `run_ingest(...)` **requires both** `startdate` and `enddate` (YYYY-MM-DD). Unbounded ingest is intentionally disallowed for repeatability.
 
-Note: the CLI does not enforce this at argument parsing time, but the ingestion code will raise if either bound is missing.
+The CLI enforces both bounds at argument parsing time.
 
 --------------------------------------------------------------------
 8. DONE-SET MODES
 --------------------------------------------------------------------
 
 `run_ingest(...)` supports:
-- `scan` (default): build done set by scanning the NAS (safest, slowest)
+- `scan` (default): build done set by scanning the lake (safest, slowest)
 - `targets`: build done set from the planned ZIP targets (fast for small runs)
 - `skip`: do not build done set (fastest; overwrites existing outputs)
 
@@ -138,8 +138,10 @@ The CLI currently uses the default `scan` mode.
 - a parent that contains `futures/daily/`
 
 This allows you to pass either:
-- `/Users/you/coding/data/kucoin/data` (contains `futures/daily/...`)
-- `/Users/you/coding/data/kucoin/data/futures/daily`
+- `/path/to/downloads` (contains `futures/daily/...`)
+- `/path/to/downloads/futures/daily`
+
+The supported CLI and public API require explicit download, lake, and local-staging paths. Environment-backed generic defaults remain only for legacy module helpers; importing the package does not create directories.
 
 --------------------------------------------------------------------
 10. CLI ENTRYPOINTS

@@ -1,183 +1,146 @@
 # KuCoin Lake
 
-A canonical, research-grade data lake, metadata, and universe-engineering system for KuCoin futures (and later spot) built around Parquet + DuckDB.
+Python, Parquet, and DuckDB tooling for reproducible KuCoin futures ingestion, data-quality validation, daily aggregation, and point-in-time liquidity universes.
 
-This project exists to support:
-- Correct, reproducible quantitative research
-- Deterministic data ingestion and transformation
-- Multi-timeframe metadata (1m, 1d, later 1h+) without destructive side effects
-- Incremental, resumable updates
-- Explicit auditability (manifest, integrity checks, run logs)
+This repository is the data foundation I built for independent cross-sectional crypto research. It converts KuCoin bulk archives into a partitioned research lake, maintains rebuildable metadata, validates stored daily bars against minute inputs, and constructs a D-1 liquidity universe with entry/exit hysteresis.
 
-It is not a trading bot.  
-It is a data engineering and research foundation.
+It is a single-machine research data system, not a trading bot, backtester, or live execution platform.
 
---------------------------------------------------------------------
-WHAT THIS REPOSITORY DOES
---------------------------------------------------------------------
+## Pipeline
 
-At a high level, the system handles:
-
-1) Ingestion (input adapters)
-   - Parses KuCoin bulk ZIP downloads
-   - Normalizes schema and timestamps
-   - Writes canonical Parquet files into a deterministic lake layout
-
-2) Canonical Parquet data lake
-   - Hive-style partitioning
-   - Supports multiple datasets (klines, mark, index, funding)
-   - Supports multiple timeframes side-by-side (1m + 1d today, more later)
-
-3) Metadata layer (DuckDB)
-   - File manifest (what exists, what changed)
-   - Partition coverage
-   - Per-symbol dataset stats
-   - Alignment summaries
-   - Liquidity metrics
-
-4) Integrity hooks (optional but recommended)
-   - Gap/duplicate detection for klines
-   - Detection of silent data corruption
-
-5) Universe engineering
-   - Liquidity-based ranking
-   - Stability via hysteresis rules
-   - Research-ready universe snapshots
-
-All components are designed to be:
-- Idempotent
-- Incremental
-- Explicitly scoped by market and timeframe
-- Safe against cross-timeframe corruption
-
---------------------------------------------------------------------
-REPOSITORY LAYOUT
---------------------------------------------------------------------
-
-kucoin-lake/
-  archive/                  # Legacy scripts (reference only, not evolving)
-  docs/                     # Canonical documentation and contracts
-  kucoin_lake/              # Package code (after refactor)
-  tests/                    # Tests and tiny fixture lake
-  pyproject.toml
-  README.md
-
-Key directories:
-
-archive/
-  Snapshot of the original working scripts. Treated as read-only reference.
-
-docs/
-  The real specification for how the system behaves:
-  - architecture.md
-  - data_lake_layout.md
-  - metadata_contracts.md
-  - runbooks.md
-  - decisions.md
-  - local_download_layout.md
-
-kucoin_lake/
-  The actual implementation (refactored from files in archive/ toward modular structure).
-
-tests/fixtures/lake/
-  Tiny synthetic Parquet data that mirrors the canonical lake layout and is used
-  for tests and tooling (including Codex).
-
---------------------------------------------------------------------
-DESIGN PHILOSOPHY
---------------------------------------------------------------------
-
-This project is deliberately built around a few hard principles:
-
-- Correctness over performance
-- Explicit over implicit
-- Contracts over convenience
-- Idempotence everywhere
-- No silent cross-timeframe effects
-- Filesystem is source of truth
-- Metadata is queryable and auditable
-
-If something behaves ambiguously, the documentation in docs/ wins.
-
---------------------------------------------------------------------
-INTENDED USAGE (SHAPE ONLY, NOT FINAL API)
---------------------------------------------------------------------
-
-This repository is not yet a polished CLI tool, but the intended usage looks like:
-
-- Ingest raw downloads into the lake
-- Run metadata builds for a given market and timeframe
-- Run integrity checks
-- Build or update a research universe
-
-Example conceptual commands (shape only, not final API):
-
-kucoin-lake ingest   --market futures --source ~/downloads
-kucoin-lake metadata --market futures --timeframe 1m
-kucoin-lake resample --market futures --from 1m --to 1d
-kucoin-lake integrity --market futures --timeframe 1m
-kucoin-lake universe --market futures --timeframe 1m
-
-Exact interfaces will evolve.  
-The contracts in docs/ are considered stable.
-
---------------------------------------------------------------------
-NOTEBOOK USAGE
---------------------------------------------------------------------
-
-Minimal notebook-friendly entrypoints are available via the package:
-
-```python
-from kucoin_lake import build_metadata
+```text
+KuCoin archives
+    -> resumable ZIP downloads
+    -> normalized 1m Parquet partitions
+    -> monthly 1d Parquet partitions
+    -> DuckDB coverage, integrity, and liquidity metadata
+    -> validation artifacts
+    -> D-1 research universe and return panel
 ```
 
---------------------------------------------------------------------
-WHO THIS IS FOR
---------------------------------------------------------------------
+The lake is the source data; DuckDB metadata and research outputs can be rebuilt from it.
 
-This project is designed for:
+## What it demonstrates
 
-- Quantitative researchers
-- Data engineers working on financial data
-- Anyone building serious research pipelines on crypto market data
-- Future-me (who will forget half of these decisions without documentation)
+- Month-sharded remote discovery, retries, partial-download handling, and resumable fetches.
+- Atomic local staging and final lake writes for NAS-friendly ingestion.
+- Hive-style partitions with daily raw data and monthly derived data.
+- Incremental metadata based on file size and modification-time fingerprints.
+- UTC session handling, timeframe isolation, idempotence, and gap/duplicate checks.
+- Rebuild-based metadata validation and independent 1m-to-1d aggregate comparisons.
+- Point-in-time universe membership using D-1 liquidity ranks and entry/exit hysteresis.
+- Exact calendar-day research returns that do not bridge missing bars or membership gaps.
 
-It is not designed for:
-- Casual trading
-- Plug-and-play bots
-- High-frequency execution
-- General web scraping
+## Installation
 
---------------------------------------------------------------------
-STATUS
---------------------------------------------------------------------
+Python 3.10 or newer is required.
 
-This is an active refactor from a working prototype toward:
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+python -m pytest
+```
 
-- A clean Python package structure
-- Test-backed invariants
-- Codex-assisted refactoring
-- Explicit architectural contracts
+Display the available commands with:
 
-Expect iteration.  
-Do not expect backwards compatibility with pre-refactor scripts.
+```bash
+kucoin-lake --help
+```
 
---------------------------------------------------------------------
-CANONICAL DOCUMENTATION
---------------------------------------------------------------------
+## Representative usage
 
-If you are trying to understand how the system truly works, start here:
+Fetch a small date range:
 
-- docs/architecture.md
-- docs/data_lake_layout.md
-- docs/metadata_contracts.md
-- docs/runbooks.md
-- docs/decisions.md
+```bash
+kucoin-lake fetch-futures \
+  --out-root /path/to/downloads \
+  --symbols BTCUSDTM ETHUSDTM \
+  --datatype klines funding \
+  --start-date 2025-01-01 \
+  --end-date 2025-01-07
+```
 
-These documents define the system more accurately than the current code does during refactor.
+Ingest local archives using explicit download, lake, and local-staging paths:
 
---------------------------------------------------------------------
-LICENSE
---------------------------------------------------------------------
+```bash
+kucoin-lake ingest-local-downloads-to-lake \
+  --startdate 2025-01-01 \
+  --enddate 2025-01-07 \
+  --local-root /path/to/downloads \
+  --nas-root /path/to/lake \
+  --local-staging-dir /path/to/local-stage
+```
 
-Private project. Not currently licensed for redistribution.
+Build and validate metadata:
+
+```bash
+kucoin-lake build-metadata \
+  --nas-root /path/to/lake \
+  --market futures \
+  --timeframe-filter 1m
+
+kucoin-lake validate all \
+  --nas-root /path/to/lake \
+  --meta-db-path /path/to/metadata.duckdb \
+  --profile smoke
+```
+
+The package also exposes notebook-friendly entry points:
+
+```python
+from kucoin_lake import build_metadata, validate
+
+result = build_metadata(
+    "/path/to/lake",
+    market="futures",
+    timeframe_filter="1m",
+)
+
+validation = validate(
+    check="all",
+    nas_root="/path/to/lake",
+    meta_db_path="/path/to/metadata.duckdb",
+    profile="smoke",
+)
+```
+
+## Repository map
+
+- `kucoin_lake/fetch.py`: archive discovery and download.
+- `kucoin_lake/ingest.py`: ZIP normalization and atomic Parquet ingestion.
+- `kucoin_lake/resample.py`: 1m-to-1d aggregation.
+- `kucoin_lake/metadata.py`: manifest, coverage, integrity, and liquidity metadata.
+- `kucoin_lake/validation/`: metadata and derived-data validators.
+- `kucoin_lake/research/`: D-1 universe and base-panel construction.
+- `tests/`: regression tests and a 192 KB recorded KuCoin market-data fixture.
+- `docs/`: data contracts, CLI reference, and operational runbooks.
+
+## Research conventions and limitations
+
+- The current implementation supports KuCoin futures, not spot data.
+- `dollar_volume` is `sum(close * volume)`. It is a consistent liquidity proxy, but the project does not verify contract multipliers or claim that it is exact USD notional.
+- `dv_30d_median` uses up to the latest 30 available daily observations. It is not a strict calendar-day window and has no minimum-history eligibility rule.
+- Universe membership for day D uses ranks available as of D-1. Hysteresis reduces turnover but does not impose a fixed universe size.
+- Historical symbols present in the lake remain available to the universe builder, but the project has no exchange listing/delisting registry and cannot prove complete freedom from survivorship bias.
+- Validation checks reproducibility and internal contracts. It is not independent certification of the source exchange data.
+- Deleted Parquet files are not yet reconciled out of metadata automatically.
+- The system targets local/NAS research workflows; it has no distributed execution, service monitoring, or production SLA.
+
+The committed fixture files are small recorded market-data samples used to exercise the real partition and schema contracts. Generated synthetic data is used in tests that require specific edge cases.
+
+## Documentation
+
+Start with [the documentation index](docs/README.md), then see:
+
+- [Architecture](docs/architecture.md)
+- [Lake layout](docs/data_lake_layout.md)
+- [Metadata contracts](docs/metadata_contracts.md)
+- [Validation](docs/validation.md)
+- [CLI reference](docs/cli.md)
+- [Research universe](docs/research/universe.md)
+- [Research panel](docs/research/panel.md)
+
+## License
+
+MIT

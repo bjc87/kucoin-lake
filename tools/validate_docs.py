@@ -23,13 +23,11 @@ This is intentionally lightweight and "rough but useful".
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 # ---- Helpers ---------------------------------------------------------------
 
@@ -252,7 +250,9 @@ def run_cli_help(repo_root: Path, scripts: Dict[str, str]) -> CheckResult:
             if code != 0:
                 ok_any = False
             snippet = (out or err).strip().splitlines()[:12]
-            results.append(f"{name} --help (exit {code})\n" + "\n".join(f"    {l}" for l in snippet))
+            results.append(
+                f"{name} --help (exit {code})\n" + "\n".join(f"    {line}" for line in snippet)
+            )
         except FileNotFoundError:
             ok_any = False
             results.append(f"{name} --help -> command not found in PATH (is the venv activated?)")

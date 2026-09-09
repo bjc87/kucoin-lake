@@ -109,6 +109,8 @@ Supporting workflows:
 - Derived from klines only.
 - Rolling medians and ranks include lookback pre-history.
 - Only computed for `timeframe_filter == '1m'` in current code.
+- `dollar_volume` is calculated as `sum(close * volume)`. It is a consistent liquidity proxy, not verified futures USD notional; contract multipliers are not modelled.
+- `dv_30d_median` is the median of up to 30 available daily observations, not a strict calendar-day window. There is no minimum-history eligibility rule.
 
 --------------------------------------------------------------------
 7. md_kline_integrity_day
@@ -148,7 +150,7 @@ After any build (phase-2 validation surface):
 - Idempotence: re-run with no changes yields same counts and values
 
 Current explicit boundaries:
-- Validation is contract-focused and not a research universe builder.
+- Validation is contract-focused and separate from the research universe builder in `kucoin_lake.research.universe`.
 - Candidate-superset / near-threshold helpers are validation scope selectors, not the research universe implementation.
 
 Reference:

@@ -1,6 +1,6 @@
 # KuCoin Lake — Architecture
 
-`kucoin_lake` is a **research-grade crypto futures data lake** optimized for **daily cross-sectional factor research on 1d bars**. It is not a general-purpose data engineering platform. The architecture prioritizes **research iteration speed**, **universe construction**, and **factor validation**.
+`kucoin_lake` is a single-machine crypto futures data pipeline optimized for daily cross-sectional research on 1d bars. It is not a general-purpose data platform or a live trading system.
 
 --------------------------------------------------------------------
 1. SYSTEM OVERVIEW (CURRENT PACKAGE)
@@ -121,24 +121,24 @@ Notebooks and ad hoc audits consume validation outputs; they are not the canonic
 8. UNIVERSE CONSTRUCTION (RESEARCH WORKFLOW)
 --------------------------------------------------------------------
 
-Universe construction is **not implemented as code in this package**. It is a research workflow built on metadata tables:
+Universe construction is implemented in `kucoin_lake.research.universe` as a research workflow built on metadata tables:
 - Start from `md_liquidity_daily` for liquidity ranks (rolling median + rank).
 - Use `md_alignment_summary` to ensure core datasets are present and complete.
 - Use `md_kline_integrity_day` to exclude symbol-days with data quality issues.
 - Use `md_partition_coverage` to diagnose missing data and gaps.
 
-Validation scope helpers (`select_candidate_superset_symbols`, `select_near_threshold_symbols`) are not a research universe builder; they only define symbol scopes for validation runs.
+Membership for day D uses D-1 liquidity ranks, with entry/exit hysteresis to reduce turnover. Validation scope helpers (`select_candidate_superset_symbols`, `select_near_threshold_symbols`) are separate and only define symbol scopes for validation runs.
 
-This is the intended data path for tradable universe construction in notebooks or downstream research code.
+The implementation retains historical symbols that exist in metadata, but it does not maintain an exchange listing/delisting registry and therefore cannot prove complete freedom from survivorship bias.
 
 --------------------------------------------------------------------
 9. FIXTURE GROUNDING
 --------------------------------------------------------------------
 
-`tests/fixtures/lake/futures` is the canonical miniature lake example. All documentation and reasoning should be consistent with this fixture layout.
+`tests/fixtures/lake/futures` is a miniature lake of recorded KuCoin market-data samples. Generated synthetic data is used by tests that require controlled edge cases.
 
 --------------------------------------------------------------------
 10. NOTE ON CLI HELP
 --------------------------------------------------------------------
 
-`kucoin_lake.cli` defines the complete CLI interface. In this repo environment, running `python -m kucoin_lake.cli --help` fails because `duckdb` is not installed. CLI documentation is therefore derived directly from `kucoin_lake/cli.py` (the argparse definitions).
+`kucoin_lake.cli` defines the CLI interface. Run `python -m kucoin_lake.cli --help` or `kucoin-lake --help` in an installed environment to inspect it.

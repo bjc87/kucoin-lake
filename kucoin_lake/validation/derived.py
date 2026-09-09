@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import calendar
 import glob
 import re
-import calendar
 from datetime import date
 from pathlib import Path
 from typing import Optional, Sequence

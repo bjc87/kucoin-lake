@@ -3,9 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import duckdb
-import pandas as pd
-
 import metadata as metadata_module
+import pandas as pd
 
 
 def _write_raw_1m_file(

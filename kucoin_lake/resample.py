@@ -11,6 +11,7 @@ import duckdb
 from kucoin_lake.ingest import LOCAL_STAGE_ROOT, atomic_copy_to_parquet
 from kucoin_lake.paths import parse_lake_partitions
 
+
 def _month_str(d: str) -> str:
     return d[:7]  # "YYYY-MM-DD" -> "YYYY-MM"
 
@@ -478,6 +479,7 @@ def resample_bars(
         summary["skipped_exists"] = sum(1 for r in results if r.get("status") == "skipped_exists")
         summary["errors"] = [r for r in results if r.get("status") == "error"]
         summary["errors_count"] = len(summary["errors"])
+        summary["ok"] = summary["errors_count"] == 0
         return summary
 
     finally:

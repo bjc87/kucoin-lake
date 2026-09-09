@@ -5,8 +5,12 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Iterable
 
-from kucoin_lake.constants import DATASETS, DataType, DEFAULT_FUTURES_DATASETS, FUTURES_DATASETS_WITH_TIMEFRAME
-
+from kucoin_lake.constants import (
+    DATASETS,
+    DEFAULT_FUTURES_DATASETS,
+    FUTURES_DATASETS_WITH_TIMEFRAME,
+    DataType,
+)
 
 _DATE_RE = re.compile(r"(\d{4}-\d{2}-\d{2})\.zip(?:\.CHECKSUM)?$")
 

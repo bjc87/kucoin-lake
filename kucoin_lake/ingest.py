@@ -2,23 +2,17 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import tempfile
 import time
 import zipfile
-import tempfile
-from datetime import datetime, timezone
-from datetime import date
-from typing import Iterable
+from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
-import shutil
-import sys
+from typing import Iterable
 
 import duckdb
-
-from dataclasses import dataclass
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
 
 from kucoin_lake.paths import month_starts
 
@@ -30,10 +24,11 @@ except Exception:  # tqdm not installed
 # -----------------------------
 # CONFIG
 # -----------------------------
-LOCAL_ROOT = Path("/Users/benchurch/coding/data/kucoin/data")  # contains futures/...
-NAS_ROOT = Path("/Volumes/quant_data/kucoin")
-LOCAL_STAGE_ROOT = Path("/Users/benchurch/coding/data/kucoin/data/_stage_parquet")
-LOCAL_STAGE_ROOT.mkdir(parents=True, exist_ok=True)
+LOCAL_ROOT = Path(os.environ.get("KUCOIN_LAKE_LOCAL_ROOT", "data/kucoin/downloads")).expanduser()
+NAS_ROOT = Path(os.environ.get("KUCOIN_LAKE_NAS_ROOT", "data/kucoin/lake")).expanduser()
+LOCAL_STAGE_ROOT = Path(
+    os.environ.get("KUCOIN_LAKE_LOCAL_STAGE_ROOT", "data/kucoin/staging")
+).expanduser()
 
 KLINES_ROOT  = LOCAL_ROOT / "futures/daily/klines"
 FUNDING_ROOT = LOCAL_ROOT / "futures/daily/fundingRates"
@@ -82,10 +77,10 @@ DATASET_DIRS = ("klines", "fundingRates", "mark", "index")
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
-def log_error(record: dict) -> None:
-    ERRORS_LOG.parent.mkdir(parents=True, exist_ok=True)
+def log_error(record: dict, *, errors_log: Path = ERRORS_LOG) -> None:
+    errors_log.parent.mkdir(parents=True, exist_ok=True)
     record = {**record, "when_utc": utc_now_iso()}
-    with open(ERRORS_LOG, "a", encoding="utf-8") as f:
+    with open(errors_log, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 def is_in_flight(zip_path: Path) -> bool:
@@ -153,10 +148,12 @@ def resolve_local_download_root(local_root: Path, market: str | None = None) -> 
 #     rel = zip_path.relative_to(LOCAL_ROOT)
 #     return (NAS_ROOT / rel).with_suffix(".parquet")
 
-def out_path_klines(asset: str, timeframe: str, date_str: str) -> Path:
+def out_path_klines(
+    asset: str, timeframe: str, date_str: str, *, nas_root: Path = NAS_ROOT
+) -> Path:
     # /.../futures/klines/timeframe=1m/symbol=ASSET/date=YYYY-MM-DD/data.parquet
     return (
-        NAS_ROOT
+        nas_root
         / "futures" / "klines"
         / f"timeframe={timeframe}"
         / f"symbol={asset}"
@@ -164,20 +161,22 @@ def out_path_klines(asset: str, timeframe: str, date_str: str) -> Path:
         / "data.parquet"
     )
 
-def out_path_funding(asset: str, date_str: str) -> Path:
+def out_path_funding(asset: str, date_str: str, *, nas_root: Path = NAS_ROOT) -> Path:
     # /.../futures/funding/symbol=ASSET/date=YYYY-MM-DD/data.parquet
     return (
-        NAS_ROOT
+        nas_root
         / "futures" / "funding"
         / f"symbol={asset}"
         / f"date={date_str}"
         / "data.parquet"
     )
 
-def out_path_mark(asset: str, timeframe: str, date_str: str) -> Path:
+def out_path_mark(
+    asset: str, timeframe: str, date_str: str, *, nas_root: Path = NAS_ROOT
+) -> Path:
     # /.../futures/mark/timeframe=1m/symbol=ASSET/date=YYYY-MM-DD/data.parquet
     return (
-        NAS_ROOT
+        nas_root
         / "futures" / "mark"
         / f"timeframe={timeframe}"
         / f"symbol={asset}"
@@ -185,10 +184,12 @@ def out_path_mark(asset: str, timeframe: str, date_str: str) -> Path:
         / "data.parquet"
     )
 
-def out_path_index(asset: str, timeframe: str, date_str: str) -> Path:
+def out_path_index(
+    asset: str, timeframe: str, date_str: str, *, nas_root: Path = NAS_ROOT
+) -> Path:
     # /.../futures/index/timeframe=1m/symbol=ASSET/date=YYYY-MM-DD/data.parquet
     return (
-        NAS_ROOT
+        nas_root
         / "futures" / "index"
         / f"timeframe={timeframe}"
         / f"symbol={asset}"
@@ -233,26 +234,26 @@ def build_done_set(
     return done
 
 
-def _expected_out_path(dataset: str, zip_path: Path) -> Path:
+def _expected_out_path(dataset: str, zip_path: Path, *, nas_root: Path = NAS_ROOT) -> Path:
     if dataset == "klines":
         asset = zip_path.parent.parent.name
         timeframe = zip_path.parent.name
         date_str = parsedate_from_stem(zip_path)
-        return out_path_klines(asset, timeframe, date_str)
+        return out_path_klines(asset, timeframe, date_str, nas_root=nas_root)
     if dataset == "funding":
         asset = zip_path.parent.name
         date_str = parsedate_from_stem(zip_path)
-        return out_path_funding(asset, date_str)
+        return out_path_funding(asset, date_str, nas_root=nas_root)
     if dataset == "mark":
         asset = zip_path.parent.parent.name
         timeframe = zip_path.parent.name
         date_str = parsedate_from_stem(zip_path)
-        return out_path_mark(asset, timeframe, date_str)
+        return out_path_mark(asset, timeframe, date_str, nas_root=nas_root)
     if dataset == "index":
         asset = zip_path.parent.parent.name
         timeframe = zip_path.parent.name
         date_str = parsedate_from_stem(zip_path)
-        return out_path_index(asset, timeframe, date_str)
+        return out_path_index(asset, timeframe, date_str, nas_root=nas_root)
     raise ValueError(f"Unknown dataset: {dataset}")
 
 
@@ -273,7 +274,7 @@ def build_done_set_from_targets(
     ]
     for dataset, zips in targets:
         for zp in zips:
-            out_path = _expected_out_path(dataset, zp)
+            out_path = _expected_out_path(dataset, zp, nas_root=nas_root)
             if out_path.exists():
                 done.add(out_path.relative_to(nas_root).as_posix())
     return done
@@ -522,6 +523,10 @@ def convert_klines_zip(
     con: duckdb.DuckDBPyConnection,
     zip_path: Path,
     done: set[str],
+    *,
+    nas_root: Path = NAS_ROOT,
+    local_stage_root: Path = LOCAL_STAGE_ROOT,
+    errors_log: Path = ERRORS_LOG,
 ) -> str:
     """
     Convert one KuCoin klines zip -> parquet.
@@ -536,8 +541,8 @@ def convert_klines_zip(
     timeframe = zip_path.parent.name        # e.g. 1m
     date_str = parsedate_from_stem(zip_path)
 
-    out_path = out_path_klines(asset, timeframe, date_str)
-    out_rel = out_path.relative_to(NAS_ROOT).as_posix()
+    out_path = out_path_klines(asset, timeframe, date_str, nas_root=nas_root)
+    out_rel = out_path.relative_to(nas_root).as_posix()
 
     # Already written
     if out_rel in done:
@@ -549,7 +554,10 @@ def convert_klines_zip(
 
     ok, reason = zip_is_valid(zip_path)
     if not ok:
-        log_error({"dataset": "klines", "zip": zip_path.as_posix(), "error": reason})
+        log_error(
+            {"dataset": "klines", "zip": zip_path.as_posix(), "error": reason},
+            errors_log=errors_log,
+        )
         return "fail"
 
     try:
@@ -587,7 +595,13 @@ def convert_klines_zip(
                 )
             """
 
-            atomic_copy_to_parquet(con, select_sql, out_path)
+            atomic_copy_to_parquet(
+                con,
+                select_sql,
+                out_path,
+                nas_root=nas_root,
+                local_stage_root=local_stage_root,
+            )
 
         done.add(out_rel)
         return "ok"
@@ -598,7 +612,8 @@ def convert_klines_zip(
                 "dataset": "klines",
                 "zip": zip_path.as_posix(),
                 "error": f"{type(e).__name__}: {e}",
-            }
+            },
+            errors_log=errors_log,
         )
         return "fail"
 
@@ -835,6 +850,10 @@ def convert_funding_zip(
     con: duckdb.DuckDBPyConnection,
     zip_path: Path,
     done: set[str],
+    *,
+    nas_root: Path = NAS_ROOT,
+    local_stage_root: Path = LOCAL_STAGE_ROOT,
+    errors_log: Path = ERRORS_LOG,
 ) -> str:
     """
     Convert one KuCoin fundingRates zip -> parquet.
@@ -848,8 +867,8 @@ def convert_funding_zip(
     asset = zip_path.parent.name
     date_str = parsedate_from_stem(zip_path)
 
-    out_path = out_path_funding(asset, date_str)
-    out_rel = out_path.relative_to(NAS_ROOT).as_posix()
+    out_path = out_path_funding(asset, date_str, nas_root=nas_root)
+    out_rel = out_path.relative_to(nas_root).as_posix()
 
     if out_rel in done:
         return "done"
@@ -859,7 +878,10 @@ def convert_funding_zip(
 
     ok, reason = zip_is_valid(zip_path)
     if not ok:
-        log_error({"dataset": "fundingRates", "zip": zip_path.as_posix(), "error": reason})
+        log_error(
+            {"dataset": "fundingRates", "zip": zip_path.as_posix(), "error": reason},
+            errors_log=errors_log,
+        )
         return "fail"
 
     try:
@@ -898,7 +920,13 @@ def convert_funding_zip(
                 )
             """
 
-            atomic_copy_to_parquet(con, select_sql, out_path)
+            atomic_copy_to_parquet(
+                con,
+                select_sql,
+                out_path,
+                nas_root=nas_root,
+                local_stage_root=local_stage_root,
+            )
 
         done.add(out_rel)
         return "ok"
@@ -910,7 +938,8 @@ def convert_funding_zip(
                 "zip": zip_path.as_posix(),
                 "out": out_path.as_posix(),
                 "error": f"{type(e).__name__}: {e}",
-            }
+            },
+            errors_log=errors_log,
         )
         return "fail"
 
@@ -918,6 +947,10 @@ def convert_mark_zip(
     con: duckdb.DuckDBPyConnection,
     zip_path: Path,
     done: set[str],
+    *,
+    nas_root: Path = NAS_ROOT,
+    local_stage_root: Path = LOCAL_STAGE_ROOT,
+    errors_log: Path = ERRORS_LOG,
 ) -> str:
     """
     Convert one KuCoin mark zip -> parquet.
@@ -928,8 +961,8 @@ def convert_mark_zip(
     timeframe = zip_path.parent.name
     date_str = parsedate_from_stem(zip_path)
 
-    out_path = out_path_mark(asset, timeframe, date_str)
-    out_rel = out_path.relative_to(NAS_ROOT).as_posix()
+    out_path = out_path_mark(asset, timeframe, date_str, nas_root=nas_root)
+    out_rel = out_path.relative_to(nas_root).as_posix()
 
     if out_rel in done:
         return "done"
@@ -939,7 +972,10 @@ def convert_mark_zip(
 
     ok, reason = zip_is_valid(zip_path)
     if not ok:
-        log_error({"dataset": "mark", "zip": zip_path.as_posix(), "error": reason})
+        log_error(
+            {"dataset": "mark", "zip": zip_path.as_posix(), "error": reason},
+            errors_log=errors_log,
+        )
         return "fail"
 
     try:
@@ -981,7 +1017,13 @@ def convert_mark_zip(
                 )
             """
 
-            atomic_copy_to_parquet(con, select_sql, out_path)
+            atomic_copy_to_parquet(
+                con,
+                select_sql,
+                out_path,
+                nas_root=nas_root,
+                local_stage_root=local_stage_root,
+            )
 
         done.add(out_rel)
         return "ok"
@@ -993,7 +1035,8 @@ def convert_mark_zip(
                 "zip": zip_path.as_posix(),
                 "out": out_path.as_posix(),
                 "error": f"{type(e).__name__}: {e}",
-            }
+            },
+            errors_log=errors_log,
         )
         return "fail"
 
@@ -1001,6 +1044,10 @@ def convert_index_zip(
     con: duckdb.DuckDBPyConnection,
     zip_path: Path,
     done: set[str],
+    *,
+    nas_root: Path = NAS_ROOT,
+    local_stage_root: Path = LOCAL_STAGE_ROOT,
+    errors_log: Path = ERRORS_LOG,
 ) -> str:
     """
     Convert one KuCoin index zip -> parquet.
@@ -1011,8 +1058,8 @@ def convert_index_zip(
     timeframe = zip_path.parent.name
     date_str = parsedate_from_stem(zip_path)
 
-    out_path = out_path_index(asset, timeframe, date_str)
-    out_rel = out_path.relative_to(NAS_ROOT).as_posix()
+    out_path = out_path_index(asset, timeframe, date_str, nas_root=nas_root)
+    out_rel = out_path.relative_to(nas_root).as_posix()
 
     if out_rel in done:
         return "done"
@@ -1022,7 +1069,10 @@ def convert_index_zip(
 
     ok, reason = zip_is_valid(zip_path)
     if not ok:
-        log_error({"dataset": "index", "zip": zip_path.as_posix(), "error": reason})
+        log_error(
+            {"dataset": "index", "zip": zip_path.as_posix(), "error": reason},
+            errors_log=errors_log,
+        )
         return "fail"
 
     try:
@@ -1064,7 +1114,13 @@ def convert_index_zip(
                 )
             """
 
-            atomic_copy_to_parquet(con, select_sql, out_path)
+            atomic_copy_to_parquet(
+                con,
+                select_sql,
+                out_path,
+                nas_root=nas_root,
+                local_stage_root=local_stage_root,
+            )
 
         done.add(out_rel)
         return "ok"
@@ -1076,7 +1132,8 @@ def convert_index_zip(
                 "zip": zip_path.as_posix(),
                 "out": out_path.as_posix(),
                 "error": f"{type(e).__name__}: {e}",
-            }
+            },
+            errors_log=errors_log,
         )
         return "fail"
 
@@ -1549,6 +1606,9 @@ def build_zip_targets_ingest_strict(
 
 def run_ingest(
     *,
+    local_root: Path,
+    nas_root: Path,
+    local_stage_root: Path,
     startdate: str | None = None,
     enddate: str | None = None,
     assets: Iterable[str] | None = None,
@@ -1559,7 +1619,6 @@ def run_ingest(
     include_index: bool = True,
     done_set_mode: str = "scan",
     market: str | None = None,
-    local_root: Path = LOCAL_ROOT,
     show_progress: bool = True,
     verbose: bool = False,
 ) -> dict:
@@ -1568,7 +1627,7 @@ def run_ingest(
 
     - Filters by date range (inclusive), assets, and timeframes.
     - Safe to rerun: can skip anything already written (done-set) and uses atomic writes.
-    - Logs failures to ERRORS_LOG.
+    - Logs failures beneath the supplied lake root.
     - done_set_mode:
         - "scan": build done-set by scanning the NAS (safer, slower on large lakes)
         - "targets": build done-set only from the planned zip targets (fast for small runs)
@@ -1578,8 +1637,10 @@ def run_ingest(
     """
     if not local_root.exists():
         raise FileNotFoundError(f"Missing local_root: {local_root}")
-    if not NAS_ROOT.parent.exists():
-        raise FileNotFoundError(f"NAS not mounted? Missing: {NAS_ROOT.parent}")
+    if not nas_root.parent.exists():
+        raise FileNotFoundError(f"Lake parent directory not found: {nas_root.parent}")
+
+    errors_log = nas_root / "_logs" / "nas_parquet_mirror_errors.jsonl"
 
     assets_set = set(assets) if assets else None
     tfs_set = set(timeframes) if timeframes else None
@@ -1598,16 +1659,20 @@ def run_ingest(
     )
 
     datasets = set()
-    if include_klines: datasets.add("klines")
-    if include_funding: datasets.add("funding")
-    if include_mark: datasets.add("mark")
-    if include_index: datasets.add("index")
+    if include_klines:
+        datasets.add("klines")
+    if include_funding:
+        datasets.add("funding")
+    if include_mark:
+        datasets.add("mark")
+    if include_index:
+        datasets.add("index")
 
     done_set_mode = done_set_mode.lower()
     if done_set_mode == "scan":
         if verbose:
             print("Building done set (scan)...")
-        done = build_done_set(datasets=datasets)
+        done = build_done_set(datasets=datasets, nas_root=nas_root)
     elif done_set_mode == "targets":
         if verbose:
             print("Building done set (targets)...")
@@ -1616,6 +1681,7 @@ def run_ingest(
             funding_zips=funding_zips,
             mark_zips=mark_zips,
             index_zips=index_zips,
+            nas_root=nas_root,
         )
     elif done_set_mode == "skip":
         if verbose:
@@ -1675,7 +1741,7 @@ def run_ingest(
             "index_skipped": 0,
             "index_failed": 0,
         },
-        "errors_log": ERRORS_LOG.as_posix(),
+        "errors_log": errors_log.as_posix(),
     }
 
     con = duckdb.connect()
@@ -1683,7 +1749,14 @@ def run_ingest(
         con.execute("SET TimeZone = 'UTC';")
         if include_klines:
             for zp in _iter("klines", klines_zips):
-                status = convert_klines_zip(con, zp, done)
+                status = convert_klines_zip(
+                    con,
+                    zp,
+                    done,
+                    nas_root=nas_root,
+                    local_stage_root=local_stage_root,
+                    errors_log=errors_log,
+                )
                 if status in ("ok", "done"):
                     stats["result"]["klines_ok_or_done"] += 1
                 elif status == "skip":
@@ -1693,7 +1766,14 @@ def run_ingest(
 
         if include_funding:
             for zp in _iter("funding", funding_zips):
-                status = convert_funding_zip(con, zp, done)
+                status = convert_funding_zip(
+                    con,
+                    zp,
+                    done,
+                    nas_root=nas_root,
+                    local_stage_root=local_stage_root,
+                    errors_log=errors_log,
+                )
                 if status in ("ok", "done"):
                     stats["result"]["funding_ok_or_done"] += 1
                 elif status == "skip":
@@ -1703,7 +1783,14 @@ def run_ingest(
 
         if include_mark:
             for zp in _iter("mark", mark_zips):
-                status = convert_mark_zip(con, zp, done)
+                status = convert_mark_zip(
+                    con,
+                    zp,
+                    done,
+                    nas_root=nas_root,
+                    local_stage_root=local_stage_root,
+                    errors_log=errors_log,
+                )
                 if status in ("ok", "done"):
                     stats["result"]["mark_ok_or_done"] += 1
                 elif status == "skip":
@@ -1713,7 +1800,14 @@ def run_ingest(
 
         if include_index:
             for zp in _iter("index", index_zips):
-                status = convert_index_zip(con, zp, done)
+                status = convert_index_zip(
+                    con,
+                    zp,
+                    done,
+                    nas_root=nas_root,
+                    local_stage_root=local_stage_root,
+                    errors_log=errors_log,
+                )
                 if status in ("ok", "done"):
                     stats["result"]["index_ok_or_done"] += 1
                 elif status == "skip":

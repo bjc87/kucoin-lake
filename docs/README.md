@@ -2,7 +2,7 @@
 
 Start here: this file is the entry point for new developers and agents.
 
-This docs set is aligned to the **current refactored `kucoin_lake` package**. It is the authoritative description of how the system behaves today.
+This docs set describes the current `kucoin_lake` package. When behavior changes, code, tests, and documentation should be updated together.
 
 **Data Truth Hierarchy**
 1. NAS Parquet lake = canonical truth
@@ -31,4 +31,4 @@ Resampling is executed **per dataset** (`klines`, `mark`, `index`) as needed.
 - `docs/decisions.md` — Rationale for design choices
 
 **Fixture Reference**
-`tests/fixtures/lake/futures` is the canonical miniature lake layout used by tests and examples. It mirrors the real partition contract and is the recommended grounding example when reasoning about paths and partitions.
+`tests/fixtures/lake/futures` is a miniature lake of recorded KuCoin market-data samples used by tests and examples. Generated synthetic data covers controlled edge cases.

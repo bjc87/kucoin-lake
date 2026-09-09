@@ -1,10 +1,10 @@
 [project]
 name = "kucoin-lake"
 version = "0.1.0"
-description = "Canonical data lake, metadata, integrity, and universe engineering for KuCoin futures/spot Parquet data"
+description = "Reproducible KuCoin futures ingestion, validation, metadata, and research-universe tooling"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Private" }
+license = { text = "MIT" }
 
 authors = [
     { name = "Ben Church" }
@@ -15,6 +15,7 @@ dependencies = [
     "pandas>=2.0",
     "pyarrow>=12.0",
     "numpy>=1.24",
+    "requests>=2.31",
     "tqdm>=4.66",
 ]
 
@@ -48,8 +49,10 @@ include = ["kucoin_lake*"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-select = ["E", "F", "I"]   # sensible defaults: errors, pyflakes, import order
-ignore = ["E501"]         # we rely on formatter for line length
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"

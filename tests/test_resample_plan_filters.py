@@ -74,3 +74,33 @@ def test_list_source_parquet_files_filters_by_symbol_and_month(tmp_path: Path) -
     assert len(files) == 2
     assert all("symbol=BTCUSDTM" in path for path in files)
     assert all("/date=2025-12-" in path for path in files)
+
+
+def test_resample_summary_is_not_ok_when_a_task_errors(monkeypatch, tmp_path: Path) -> None:
+    task = resample_module.ResampleTask(
+        market="futures",
+        dataset="klines",
+        symbol="BTCUSDTM",
+        month="2025-12",
+    )
+    monkeypatch.setattr(resample_module, "plan_resample_tasks", lambda *args, **kwargs: [task])
+    monkeypatch.setattr(
+        resample_module,
+        "_write_resampled_month",
+        lambda *args, **kwargs: {
+            "symbol": task.symbol,
+            "month": task.month,
+            "status": "error",
+            "error": "synthetic failure",
+        },
+    )
+
+    summary = resample_module.resample_bars(
+        tmp_path / "lake",
+        local_staging_dir=tmp_path / "stage",
+        use_tqdm=False,
+    )
+
+    assert summary["ok"] is False
+    assert summary["errors_count"] == 1
+    assert summary["errors"] == summary["results"]

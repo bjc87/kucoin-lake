@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-import calendar
 from pathlib import Path
 from typing import Iterable, Iterator, Optional, Sequence
 
@@ -46,7 +46,7 @@ def iter_data_parquets(
     Parameters
     ----------
     nas_root:
-        Root of the data lake (e.g. /Volumes/quant_data/kucoin)
+        Root of the data lake (e.g. /path/to/lake)
     market:
         'futures' (now) and future-proofed for 'spot'
     datasets:

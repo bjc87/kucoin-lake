@@ -479,6 +479,7 @@ def resample_bars(
         summary["skipped_exists"] = sum(1 for r in results if r.get("status") == "skipped_exists")
         summary["errors"] = [r for r in results if r.get("status") == "error"]
         summary["errors_count"] = len(summary["errors"])
+        summary["ok"] = summary["errors_count"] == 0
         return summary
 
     finally:

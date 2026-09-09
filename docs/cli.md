@@ -122,11 +122,11 @@ Notes:
 **Purpose**: Convert local ZIP downloads into the NAS Parquet lake.
 
 Required (argparse):
-- None.
-
-Required by API logic:
 - `--startdate`
 - `--enddate`
+- `--local-root`
+- `--nas-root`
+- `--local-staging-dir`
 
 Options:
 - `--assets` (space-separated symbols)
@@ -135,13 +135,11 @@ Options:
 - `--include-funding` / `--no-funding` (default include)
 - `--include-mark` / `--no-mark` (default include)
 - `--include-index` / `--no-index` (default include)
-- `--local-root` (path to local downloads)
 - `--verbose`
 
 Notes:
-- The CLI does not enforce date bounds, but the API raises a `ValueError` if either `startdate` or `enddate` is missing.
-- Default input root is `kucoin_lake.ingest.LOCAL_ROOT` when `--local-root` is omitted.
-- Output NAS root is configured in `kucoin_lake.ingest.NAS_ROOT`.
+- All storage locations are explicit; importing the package does not create a staging directory.
+- Failures are written below `--nas-root` at `_logs/nas_parquet_mirror_errors.jsonl`.
 
 --------------------------------------------------------------------
 6. fetch-futures
@@ -287,7 +285,7 @@ No output is printed if the result is `None`.
 End-to-end (fetch -> ingest -> metadata):
 ```bash
 kucoin-lake fetch-futures \
-  --out-root /Users/you/coding/data/kucoin \
+  --out-root /path/to/downloads \
   --symbols BTCUSDTM \
   --datatype klines funding \
   --days 3 \
@@ -298,18 +296,20 @@ kucoin-lake ingest-local-downloads-to-lake \
   --enddate 2026-01-03 \
   --assets BTCUSDTM \
   --timeframes 1m \
-  --local-root /Users/you/coding/data/kucoin/data
+  --local-root /path/to/downloads/data \
+  --nas-root /path/to/lake \
+  --local-staging-dir /path/to/local-stage
 
 kucoin-lake build-metadata \
-  --nas-root /Volumes/quant_data/kucoin \
-  --meta-db-path /Users/you/coding/data/kucoin/_meta/metadata_futures.duckdb \
+  --nas-root /path/to/lake \
+  --meta-db-path /path/to/metadata.duckdb \
   --market futures \
   --datasets klines mark index funding \
   --timeframe-filter 1m
 
 kucoin-lake validate metadata \
-  --nas-root /Volumes/quant_data/kucoin \
-  --meta-db-path /Users/you/coding/data/kucoin/_meta/metadata_futures.duckdb \
+  --nas-root /path/to/lake \
+  --meta-db-path /path/to/metadata.duckdb \
   --market futures \
   --datasets klines mark index funding \
   --timeframe-filter 1m \
@@ -319,7 +319,7 @@ kucoin-lake validate metadata \
 Derived validation (single dataset):
 ```bash
 kucoin-lake validate derived-1d \
-  --nas-root /Volumes/quant_data/kucoin \
+  --nas-root /path/to/lake \
   --market futures \
   --dataset klines \
   --profile smoke
@@ -328,8 +328,8 @@ kucoin-lake validate derived-1d \
 Full trust gate:
 ```bash
 kucoin-lake validate all \
-  --nas-root /Volumes/quant_data/kucoin \
-  --meta-db-path /Users/you/coding/data/kucoin/_meta/metadata_futures.duckdb \
+  --nas-root /path/to/lake \
+  --meta-db-path /path/to/metadata.duckdb \
   --market futures \
   --datasets klines mark index funding \
   --derived-datasets klines mark index \
@@ -340,8 +340,8 @@ kucoin-lake validate all \
 Daily append trust gate:
 ```bash
 kucoin-lake validate all \
-  --nas-root /Volumes/quant_data/kucoin \
-  --meta-db-path /Users/you/coding/data/kucoin/_meta/metadata_futures.duckdb \
+  --nas-root /path/to/lake \
+  --meta-db-path /path/to/metadata.duckdb \
   --append-date-start 2026-03-31 \
   --append-date-end 2026-03-31 \
   --candidate-rank-threshold 150 \
@@ -351,7 +351,7 @@ kucoin-lake validate all \
 Resample (safe plan first):
 ```bash
 kucoin-lake resample-1m-to-1d \
-  --nas-root /Volumes/quant_data/kucoin \
+  --nas-root /path/to/lake \
   --dataset klines \
   --plan-only \
   --no-overwrite
@@ -360,8 +360,8 @@ kucoin-lake resample-1m-to-1d \
 Backfill derived (single symbol, bounded window):
 ```bash
 kucoin-lake backfill-derived \
-  --nas-root /Volumes/quant_data/kucoin \
-  --meta-db-path /Users/you/coding/data/kucoin/_meta/metadata_futures.duckdb \
+  --nas-root /path/to/lake \
+  --meta-db-path /path/to/metadata.duckdb \
   --symbols BTCUSDTM \
   --date-start 2026-01-01 \
   --date-end 2026-01-31 \
@@ -371,8 +371,8 @@ kucoin-lake backfill-derived \
 Build kline integrity (bounded window):
 ```bash
 kucoin-lake build-kline-integrity \
-  --nas-root /Volumes/quant_data/kucoin \
-  --meta-db-path /Users/you/coding/data/kucoin/_meta/metadata_futures.duckdb \
+  --nas-root /path/to/lake \
+  --meta-db-path /path/to/metadata.duckdb \
   --start-date 2026-01-01 \
   --end-date 2026-01-31
 ```

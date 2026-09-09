@@ -157,6 +157,8 @@ def test_missing_derived_completion_from_coverage(tmp_path: Path) -> None:
 
     assert liq_rows == 2
     assert int_rows == 2
+    assert day1_liq_ts_after == day1_liq_ts
+    assert day1_int_ts_after == day1_int_ts
 
 
 def test_alignment_missing_keys_trigger(tmp_path: Path) -> None:
@@ -236,8 +238,6 @@ def test_alignment_missing_keys_trigger(tmp_path: Path) -> None:
 
     assert alignment_rows == 2
     assert day2_rows == 1
-    assert day1_liq_ts_after == day1_liq_ts
-    assert day1_int_ts_after == day1_int_ts
 
     con = metadata_module.connect_meta_db(meta_db)
     try:

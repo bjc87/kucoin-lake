@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-import time
 from typing import Callable
 from urllib.parse import urlencode
 from xml.etree import ElementTree as ET
@@ -11,8 +11,8 @@ import requests
 from requests import Session
 from tqdm.auto import tqdm
 
-from kucoin_lake.ingest import log_error
 from kucoin_lake.constants import DATASETS, DataType
+from kucoin_lake.ingest import log_error
 from kucoin_lake.paths import (
     date_from_key,
     iter_dates,

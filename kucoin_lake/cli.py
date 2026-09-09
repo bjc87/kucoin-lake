@@ -120,8 +120,8 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "ingest-local-downloads-to-lake",
         help="Ingest local downloads into the lake.",
     )
-    ingest_parser.add_argument("--startdate")
-    ingest_parser.add_argument("--enddate")
+    ingest_parser.add_argument("--startdate", required=True)
+    ingest_parser.add_argument("--enddate", required=True)
     ingest_parser.add_argument("--assets", nargs="+")
     ingest_parser.add_argument("--timeframes", nargs="+")
     ingest_parser.add_argument(
@@ -168,7 +168,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         dest="include_index",
         action="store_false",
     )
-    ingest_parser.add_argument("--local-root")
+    ingest_parser.add_argument("--local-root", required=True)
+    ingest_parser.add_argument("--nas-root", required=True)
+    ingest_parser.add_argument("--local-staging-dir", required=True)
     ingest_parser.add_argument("--verbose", action="store_true")
 
     fetch_parser = subparsers.add_parser(
@@ -415,6 +417,9 @@ def _handle_resample(args: argparse.Namespace) -> dict:
 
 def _handle_ingest(args: argparse.Namespace) -> dict:
     return api.ingest_local_downloads_to_lake(
+        local_root=args.local_root,
+        nas_root=args.nas_root,
+        local_staging_dir=args.local_staging_dir,
         startdate=args.startdate,
         enddate=args.enddate,
         assets=cast_iterable(args.assets),
@@ -423,7 +428,6 @@ def _handle_ingest(args: argparse.Namespace) -> dict:
         include_funding=args.include_funding,
         include_mark=args.include_mark,
         include_index=args.include_index,
-        local_root=args.local_root,
         verbose=args.verbose,
     )
 

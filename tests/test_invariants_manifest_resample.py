@@ -6,7 +6,6 @@ from pathlib import Path
 
 import duckdb
 import pytest
-
 from metadata import connect_meta_db, get_new_or_changed_files, iter_data_parquets
 
 

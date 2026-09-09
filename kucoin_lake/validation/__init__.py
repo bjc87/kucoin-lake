@@ -12,10 +12,6 @@ from kucoin_lake.validation.artifacts import (
 )
 from kucoin_lake.validation.derived import validate_derived_1d
 from kucoin_lake.validation.metadata import validate_metadata
-from kucoin_lake.validation.scope_selection import (
-    select_candidate_superset_symbols,
-    select_near_threshold_symbols,
-)
 from kucoin_lake.validation.models import (
     ALL_STATUSES,
     STATUS_ERROR,
@@ -32,6 +28,10 @@ from kucoin_lake.validation.runner import (
     compute_overall_status,
     default_run_id,
     validation_status_to_exit_code,
+)
+from kucoin_lake.validation.scope_selection import (
+    select_candidate_superset_symbols,
+    select_near_threshold_symbols,
 )
 
 __all__ = [

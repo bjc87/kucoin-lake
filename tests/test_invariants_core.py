@@ -5,7 +5,6 @@ from datetime import date, timedelta
 from pathlib import Path
 
 import duckdb
-
 from metadata import build_or_update_metadata, connect_meta_db
 
 

@@ -10,6 +10,8 @@ Candidates are derived from DuckDB metadata table `md.md_liquidity_daily` with t
 - `dv_30d_median`, `liquidity_rank_30d`, `in_top_100`
 - `computed_at_utc`
 
+`dollar_volume` is `sum(close * volume)` and should be treated as a liquidity proxy rather than verified USD notional. `dv_30d_median` uses up to 30 available daily observations; it is not a strict calendar-day window and has no minimum-history gate.
+
 ## No-Lookahead Rule
 Universe membership for day D uses liquidity ranks computed as-of D-1 (EOD). The builder queries `md.md_liquidity_daily` rows with `date = D-1` and emits:
 - `day = date + 1 day`
@@ -94,3 +96,4 @@ summary.head()
 - No incremental updates (full rebuild only)
 - No additional QC beyond the metadata inputs
 - No CLI integration (research-only by design)
+- No exchange listing/delisting registry or proof that every historical contract was captured; the builder reduces but cannot eliminate survivorship-bias risk

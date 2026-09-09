@@ -5,7 +5,11 @@ from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
 from kucoin_lake.constants import DEFAULT_FUTURES_DATASETS
-from kucoin_lake.validation.artifacts import ensure_output_dir, write_json_payload, write_run_artifacts
+from kucoin_lake.validation.artifacts import (
+    ensure_output_dir,
+    write_json_payload,
+    write_run_artifacts,
+)
 from kucoin_lake.validation.derived import validate_derived_1d
 from kucoin_lake.validation.metadata import validate_metadata
 from kucoin_lake.validation.models import (

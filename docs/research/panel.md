@@ -10,8 +10,8 @@ This output is a research artifact and is not part of the canonical lake.
 
 ## Data Sources
 - Universe parquet from `kucoin_lake.research.universe`
-- NAS 1d klines under:
-  - `/Volumes/quant_data/kucoin/<market>/klines/timeframe=1d/symbol=<SYMBOL>/month=YYYY-MM/data.parquet`
+- 1d klines under:
+  - `<lake-root>/<market>/klines/timeframe=1d/symbol=<SYMBOL>/month=YYYY-MM/data.parquet`
 
 ## Join Keys
 Join uses:
@@ -35,7 +35,13 @@ Panel includes:
   - Secondary log returns: `log_ret_1d`, `fwd_log_ret_1d`
 - Optional universe parameters if available: `entry_n`, `exit_n`
 
-Rows are sorted by `symbol, day` before return calculations to avoid cross-symbol leakage.
+Returns use exact calendar-day endpoints from the complete bar series before universe rows are selected:
+- `ret_1d`: D-1 to D
+- `fwd_ret_1d`: D to D+1
+- `fwd_ret_5d`: D to D+5
+- `fwd_ret_20d`: D to D+20
+
+Missing endpoint bars produce null returns. Membership exit/re-entry gaps never turn multi-day moves into values labelled as one-day returns. The loader reads one day before and 20 days after the requested output interval so boundary targets can be calculated when data exists.
 
 ## Jupyter Usage
 ```python
@@ -43,7 +49,7 @@ from kucoin_lake.research.panel import build_base_panel, summarize_panel
 
 panel = build_base_panel(
     universe_path="research/outputs/universe_daily.parquet",
-    nas_root="/Volumes/quant_data/kucoin",
+    nas_root="/path/to/lake",
     market="futures",
     start_date="2025-01-01",
     end_date="2025-12-31",
@@ -67,6 +73,5 @@ summary.head()
 
 ## Known Limitations / TODO
 - Uses only 1d bars and does not include additional microstructure features.
-- Forward returns near the sample end are naturally missing.
-- First available row per symbol has missing backward return by construction.
+- Returns are missing whenever their exact calendar endpoint is unavailable.
 - No incremental panel append in this MVP.

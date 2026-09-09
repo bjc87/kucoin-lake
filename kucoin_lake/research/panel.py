@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 
 from kucoin_lake.manifest import iter_data_parquets
-
 
 UNIVERSE_REQUIRED_COLUMNS = {
     "day",
@@ -161,6 +160,38 @@ def _load_1d_klines_for_symbols(
     return df
 
 
+def _add_exact_day_returns(klines: pd.DataFrame) -> pd.DataFrame:
+    """Add return columns using exact calendar-day endpoints."""
+    if klines.duplicated(subset=["symbol", "day"]).any():
+        raise ValueError("1d klines contain duplicate (symbol, day) rows.")
+
+    result = klines.copy()
+    offsets = {
+        -1: "_close_prev_1d",
+        1: "_close_next_1d",
+        5: "_close_next_5d",
+        20: "_close_next_20d",
+    }
+    for days, column in offsets.items():
+        endpoint = klines[["symbol", "day", "close"]].copy()
+        endpoint["day"] = endpoint["day"] - pd.Timedelta(days=days)
+        endpoint = endpoint.rename(columns={"close": column})
+        result = result.merge(
+            endpoint,
+            how="left",
+            on=["symbol", "day"],
+            validate="one_to_one",
+        )
+
+    result["ret_1d"] = result["close"] / result["_close_prev_1d"] - 1
+    result["fwd_ret_1d"] = result["_close_next_1d"] / result["close"] - 1
+    result["fwd_ret_5d"] = result["_close_next_5d"] / result["close"] - 1
+    result["fwd_ret_20d"] = result["_close_next_20d"] / result["close"] - 1
+    result["log_ret_1d"] = np.log(result["close"]) - np.log(result["_close_prev_1d"])
+    result["fwd_log_ret_1d"] = np.log(result["_close_next_1d"]) - np.log(result["close"])
+    return result.drop(columns=list(offsets.values()))
+
+
 def build_base_panel(
     *,
     universe_path: str | Path,
@@ -231,8 +262,8 @@ def build_base_panel(
 
     universe = universe[keep_columns].drop_duplicates(subset=["day", "symbol"])
 
-    load_start = universe["day"].min().date()
-    load_end = universe["day"].max().date()
+    load_start = universe["day"].min().date() - timedelta(days=1)
+    load_end = universe["day"].max().date() + timedelta(days=20)
     symbols = sorted(universe["symbol"].dropna().unique().tolist())
 
     klines = _load_1d_klines_for_symbols(
@@ -243,7 +274,13 @@ def build_base_panel(
         end_date=load_end,
     )
 
-    panel = universe.merge(klines, how="left", on=["day", "symbol"])
+    klines = _add_exact_day_returns(klines)
+    panel = universe.merge(
+        klines,
+        how="left",
+        on=["day", "symbol"],
+        validate="one_to_one",
+    )
 
     if panel.empty:
         raise ValueError("No rows after joining universe to 1d klines.")
@@ -251,16 +288,6 @@ def build_base_panel(
     panel = panel.sort_values(["symbol", "day"], ignore_index=True)
 
     panel["log_dollar_volume"] = np.log(panel["dollar_volume"].clip(lower=1))
-
-    by_symbol_close = panel.groupby("symbol", sort=False)["close"]
-    panel["ret_1d"] = by_symbol_close.transform(lambda s: s / s.shift(1) - 1)
-    panel["fwd_ret_1d"] = by_symbol_close.transform(lambda s: s.shift(-1) / s - 1)
-    panel["fwd_ret_5d"] = by_symbol_close.transform(lambda s: s.shift(-5) / s - 1)
-    panel["fwd_ret_20d"] = by_symbol_close.transform(lambda s: s.shift(-20) / s - 1)
-    panel["log_ret_1d"] = by_symbol_close.transform(lambda s: np.log(s) - np.log(s.shift(1)))
-    panel["fwd_log_ret_1d"] = by_symbol_close.transform(
-        lambda s: np.log(s.shift(-1)) - np.log(s)
-    )
 
     output_columns = PANEL_BASE_COLUMNS.copy()
     if "entry_n" in panel.columns:

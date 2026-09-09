@@ -14,7 +14,7 @@ This layout is designed to support:
 
 Canonical futures lake root (example):
 ```
-/Volumes/quant_data/kucoin/futures/
+/path/to/lake/futures/
 ```
 
 **Fixture reference** (canonical miniature example):

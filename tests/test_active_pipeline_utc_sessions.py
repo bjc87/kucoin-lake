@@ -81,10 +81,13 @@ def test_run_ingest_sets_utc_session(monkeypatch, tmp_path: Path) -> None:
         return [], [], [], [], day, day
 
     monkeypatch.setattr(ingest_module, "build_zip_targets_ingest_strict", _fake_targets)
-    monkeypatch.setattr(ingest_module, "NAS_ROOT", tmp_path / "nas" / "kucoin")
+    nas_root = tmp_path / "nas" / "kucoin"
     (tmp_path / "nas").mkdir(parents=True, exist_ok=True)
 
     ingest_module.run_ingest(
+        local_root=tmp_path,
+        nas_root=nas_root,
+        local_stage_root=tmp_path / "stage",
         startdate="2024-01-02",
         enddate="2024-01-02",
         include_klines=False,
@@ -92,7 +95,6 @@ def test_run_ingest_sets_utc_session(monkeypatch, tmp_path: Path) -> None:
         include_mark=False,
         include_index=False,
         done_set_mode="skip",
-        local_root=tmp_path,
         show_progress=False,
     )
 

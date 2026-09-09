@@ -11,6 +11,7 @@ import duckdb
 from kucoin_lake.ingest import LOCAL_STAGE_ROOT, atomic_copy_to_parquet
 from kucoin_lake.paths import parse_lake_partitions
 
+
 def _month_str(d: str) -> str:
     return d[:7]  # "YYYY-MM-DD" -> "YYYY-MM"
 

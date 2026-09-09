@@ -7,7 +7,6 @@ from pathlib import Path
 import duckdb
 import pandas as pd
 
-
 REQUIRED_CANDIDATE_COLUMNS = {
     "day",
     "asof_date",

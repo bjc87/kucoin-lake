@@ -96,6 +96,30 @@ def _write_1d_klines(nas_root: Path) -> None:
                 "src_rows": 1440,
                 "max_ts": "2024-01-04 23:59:00",
             },
+            {
+                "date": "2024-01-07",
+                "open": 16.0,
+                "high": 18.0,
+                "low": 15.0,
+                "close": 17.0,
+                "volume": 75.0,
+                "dollar_volume": 1275.0,
+                "vwap": 16.5,
+                "src_rows": 1440,
+                "max_ts": "2024-01-07 23:59:00",
+            },
+            {
+                "date": "2024-01-22",
+                "open": 31.0,
+                "high": 33.0,
+                "low": 30.0,
+                "close": 32.0,
+                "volume": 70.0,
+                "dollar_volume": 2240.0,
+                "vwap": 31.5,
+                "src_rows": 1440,
+                "max_ts": "2024-01-22 23:59:00",
+            },
         ]
     ).to_parquet(a_path, index=False)
 
@@ -170,6 +194,12 @@ def test_build_base_panel_join_and_returns(tmp_path: Path) -> None:
     assert row["fwd_log_ret_1d"] == np.log(13.0) - np.log(12.0)
     assert row["log_dollar_volume"] == np.log(1080.0)
 
+    first_row = panel[
+        (panel["symbol"] == "A") & (panel["day"] == pd.Timestamp("2024-01-02"))
+    ].iloc[0]
+    assert first_row["fwd_ret_5d"] == (17.0 / 11.0 - 1.0)
+    assert first_row["fwd_ret_20d"] == (32.0 / 11.0 - 1.0)
+
     required_cols = {
         "day",
         "symbol",
@@ -229,6 +259,68 @@ def test_build_base_panel_respects_require_in_universe(tmp_path: Path) -> None:
     assert panel_required[
         (panel_required["symbol"] == "B") & (panel_required["day"] == pd.Timestamp("2024-01-03"))
     ].empty
+    reentry = panel_required[
+        (panel_required["symbol"] == "B") & (panel_required["day"] == pd.Timestamp("2024-01-04"))
+    ].iloc[0]
+    assert reentry["ret_1d"] == (21.0 / 20.0 - 1.0)
+
+
+def test_build_base_panel_does_not_bridge_missing_calendar_days(tmp_path: Path) -> None:
+    universe_path = tmp_path / "universe.parquet"
+    output_path = tmp_path / "base_panel.parquet"
+    nas_root = tmp_path / "nas"
+
+    universe = _universe_rows(include_flag=False)
+    universe = universe[
+        (universe["symbol"] == "A") & universe["day"].isin(["2024-01-02", "2024-01-04"])
+    ]
+    universe.to_parquet(universe_path, index=False)
+    _write_1d_klines(nas_root)
+
+    a_path = (
+        nas_root
+        / "futures"
+        / "klines"
+        / "timeframe=1d"
+        / "symbol=A"
+        / "month=2024-01"
+        / "data.parquet"
+    )
+    bars = pd.read_parquet(a_path)
+    bars[bars["date"] != "2024-01-03"].to_parquet(a_path, index=False)
+
+    panel = build_base_panel(
+        universe_path=universe_path,
+        nas_root=nas_root,
+        start_date="2024-01-02",
+        end_date="2024-01-04",
+        output_path=output_path,
+    )
+
+    day2 = panel[panel["day"] == pd.Timestamp("2024-01-02")].iloc[0]
+    day4 = panel[panel["day"] == pd.Timestamp("2024-01-04")].iloc[0]
+    assert np.isnan(day2["fwd_ret_1d"])
+    assert np.isnan(day4["ret_1d"])
+
+
+def test_build_base_panel_uses_forward_bar_beyond_output_window(tmp_path: Path) -> None:
+    universe_path = tmp_path / "universe.parquet"
+    output_path = tmp_path / "base_panel.parquet"
+    nas_root = tmp_path / "nas"
+
+    _universe_rows(include_flag=False).to_parquet(universe_path, index=False)
+    _write_1d_klines(nas_root)
+
+    panel = build_base_panel(
+        universe_path=universe_path,
+        nas_root=nas_root,
+        start_date="2024-01-03",
+        end_date="2024-01-03",
+        output_path=output_path,
+    )
+
+    row = panel[(panel["symbol"] == "A") & (panel["day"] == pd.Timestamp("2024-01-03"))].iloc[0]
+    assert row["fwd_ret_1d"] == (13.0 / 12.0 - 1.0)
 
 
 def test_summarize_panel_outputs_expected_columns() -> None:
